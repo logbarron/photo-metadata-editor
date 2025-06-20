@@ -28,7 +28,11 @@ When you photograph or scan prints and negatives, the date and location informat
 ![Grid View](assets/images/pem_grid.png)
 *Grid view for batch selection and management*
 
-**[Demo Video (40s)](assets/videos/pem_demo.mp4)**
+## Demo Video
+
+https://github.com/user-attachments/assets/e9d5d7d6-7f1a-4c5b-9a46-f8e383ec118d
+
+*40-second demonstration of the Photo Metadata Editor in action*
 
 ## Quick Start
 
