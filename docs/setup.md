@@ -233,7 +233,7 @@ Most users only need Part 1. See [Pipeline Setup](pipeline.md) if you need to tr
 ## Next Steps
 
 Once setup is complete:
-1. Read the [User Guide](guide.md) to learn the interface
+1. Read the [User Guide](user-guide.md) to learn the interface
 2. Process a small test batch first (10-20 photos)
 3. Make a backup before processing your entire collection
 4. Set up [Pipeline](pipeline.md) only if using multiple Macs
