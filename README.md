@@ -7,7 +7,7 @@
 Fix dates and locations on digitized photos, with optional Mac-to-Mac transfer for Apple Photos import.
 
 <p align="left">
-  <img alt="Photo Metadata Editor" src="docs/assets/images/pem_complete.png">
+  <img alt="Photo Metadata Editor" src="assets/images/pem_complete.png">
 </p>
 
 When you photograph or scan prints and negatives, the date and location information is often incorrect. This tool updates the metadata to reflect when and where the photos were actually taken.
@@ -22,13 +22,13 @@ When you photograph or scan prints and negatives, the date and location informat
 
 ## Screenshots
 
-![Start Review](docs/assets/images/pem_start.png)
+![Start Review](assets/images/pem_start.png)
 *Initial view showing photos that need metadata review*
 
-![Grid View](docs/assets/images/pem_grid.png)
+![Grid View](assets/images/pem_grid.png)
 *Grid view for batch selection and management*
 
-**[Demo Video (40s)](docs/assets/videos/pem_demo.mp4)**
+**[Demo Video (40s)](assets/videos/pem_demo.mp4)**
 
 ## Quick Start
 
