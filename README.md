@@ -4,13 +4,11 @@
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11+-green.svg)]()
 
-Fix dates and locations on digitized photos, with optional Mac-to-Mac transfer for Apple Photos import.
-
 <p align="left">
   <img alt="Photo Metadata Editor" src="assets/images/pem_complete.png">
 </p>
 
-When you photograph or scan prints and negatives, the date and location information is often incorrect. This tool updates the metadata to reflect when and where the photos were actually taken.
+When you photograph or scan prints and negatives, the date and location information is often incorrect. This tool updates the metadata to reflect when and where the photos were actually taken. Once corrected, photos can be transferred between Macs with an optional automated Apple Photos import.
 
 ## Features
 
