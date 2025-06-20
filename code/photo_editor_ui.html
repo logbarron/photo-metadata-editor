@@ -1689,13 +1689,22 @@ Licensed under GPL v3 - see LICENSE file for details.
             const locSugBtn = document.getElementById('location-suggestion-btn');
             if (locationSuggestion) {
                 let sugText = 'Use suggestion: ';
-                if (locationSuggestion.city && locationSuggestion.state) {
-                    sugText += `${locationSuggestion.city}, ${locationSuggestion.state}`;
-                } else if (locationSuggestion.state) {
-                    sugText += locationSuggestion.state;
+                let sugParts = [];
+                
+                if (locationSuggestion.city) sugParts.push(locationSuggestion.city);
+                if (locationSuggestion.state) sugParts.push(locationSuggestion.state);
+                if (locationSuggestion.country && locationSuggestion.country !== '' && 
+                    locationSuggestion.country !== 'United States') {
+                    sugParts.push(locationSuggestion.country);
                 }
-                locSugBtn.textContent = sugText;
-                locSugBtn.style.display = 'block';
+                
+                if (sugParts.length > 0) {
+                    sugText += sugParts.join(', ');
+                    locSugBtn.textContent = sugText;
+                    locSugBtn.style.display = 'block';
+                } else {
+                    locSugBtn.style.display = 'none';
+                }
             } else {
                 locSugBtn.style.display = 'none';
             }
@@ -1959,10 +1968,18 @@ Licensed under GPL v3 - see LICENSE file for details.
         async function acceptLocationSuggestion() {
             if (!locationSuggestion) return;
 
-            // Compose the query string
-            const query = locationSuggestion.city
-                ? `${locationSuggestion.city}, ${locationSuggestion.state}`
-                : locationSuggestion.state;
+            // Compose the query string including country for international locations
+            let queryParts = [];
+            if (locationSuggestion.city) queryParts.push(locationSuggestion.city);
+            if (locationSuggestion.state) queryParts.push(locationSuggestion.state);
+            if (locationSuggestion.country && locationSuggestion.country !== '' && 
+                locationSuggestion.country !== 'United States') {
+                queryParts.push(locationSuggestion.country);
+            }
+            
+            const query = queryParts.join(', ');
+            
+            if (!query) return;
 
             // Put it in the input
             const input = document.getElementById('location-search');

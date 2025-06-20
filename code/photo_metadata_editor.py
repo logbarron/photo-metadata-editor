@@ -57,12 +57,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 import threading
-import subprocess
-from datetime import datetime
 import queue
 import hashlib
 import tempfile
-import shutil
 import socket
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
@@ -75,7 +72,7 @@ from timezonefinder import TimezoneFinder
 
 # Apple geocoding imports
 import objc
-from CoreLocation import CLGeocoder
+from CoreLocation import CLLocationManager
 from Foundation import NSRunLoop, NSDate, NSThread
 from PyObjCTools import AppHelper
 
@@ -493,14 +490,13 @@ except ImportError:
     MKLocalSearch = None
     MKLocalSearchRequest = None
 
-# Initialize geocoders
+# Initialize location services (required for MKLocalSearch)
+_location_manager = None
 try:
-    _geocoder = CLGeocoder.alloc().init()
-    _apple_geocoding_available = True
+    _location_manager = CLLocationManager.alloc().init()
+    logger.info("Location services initialized for MKLocalSearch")
 except Exception as e:
-    _apple_geocoding_available = False
-    _geocoder = None
-    logger.warning(f"Apple geocoding unavailable: {e}")
+    logger.warning(f"Could not initialize location services: {e}")
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -508,7 +504,6 @@ except Exception as e:
 
 def calculate_file_hash(filepath: Path) -> str:
     """Calculate SHA256 hash of file"""
-    import hashlib
     hash_sha256 = hashlib.sha256()
     with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
@@ -606,6 +601,15 @@ class LocationInfo:
     gps_lon: Optional[float] = None
     gps_source: Optional[DataSource] = None
     landmark_name: Optional[str] = None
+    landmark_source: Optional[DataSource] = None
+    
+    # New fields for international support
+    country: str = ""
+    country_code: str = ""
+    country_source: Optional[DataSource] = None
+    street: str = ""
+    postal_code: str = ""
+    neighborhood: str = ""
     
     def is_complete(self) -> bool:
         """Has city and state from user OR has exact GPS from user"""
@@ -632,58 +636,112 @@ class SmartLocation:
     city: str
     state: str
     landmark_name: Optional[str] = None
-    address: Optional[str] = None
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
-    display_primary: Optional[str] = None
-    display_secondary: Optional[str] = None
-    display_full: Optional[str] = None
     category: Optional[Category] = None
     id: Optional[int] = None
     use_count: int = 0
     last_used: Optional[datetime] = None
     
-    def __post_init__(self):
-        # Set primary display
-        if not self.display_primary:
-            if self.landmark_name:
-                self.display_primary = self.landmark_name
-            elif self.address:
-                self.display_primary = self.address
+    # International support fields
+    country: str = ""
+    country_code: str = ""
+    street: str = ""
+    postal_code: str = ""
+    neighborhood: str = ""
+    
+    @property
+    def display_primary(self) -> str:
+        """Primary display text for UI"""
+        if self.landmark_name:
+            return self.landmark_name
+        elif self.street:
+            return self.street
+        else:
+            parts = []
+            if self.city:
+                parts.append(self.city)
+            if self.state:
+                parts.append(self.state)
+            elif self.country and self.country not in ["United States", "USA", ""]:
+                # For international locations without states, show country
+                parts.append(self.country)
+            
+            if parts:
+                return ", ".join(parts)
+            elif self.country:
+                return self.country
             else:
-                if self.city:
-                    self.display_primary = f"{self.city}, {self.state}"
-                else:
-                    self.display_primary = self.state
+                return "Unknown Location"
+    
+    @property
+    def display_secondary(self) -> str:
+        """Secondary display - shows what will be saved"""
+        location_parts = []
         
-        # Set secondary display - show what will be saved
-        if not self.display_secondary:
-            if self.category == Category.STATE:
-                actual_city = self.city or "State Center"
-                self.display_secondary = f"{actual_city}, {self.state}"
-            elif self.category == Category.COUNTRY:
-                if self.city:
-                    self.display_secondary = f"{self.city}, {self.state}"
-                else:
-                    self.display_secondary = self.state
-            elif self.category == Category.POI:
-                self.display_secondary = f"{self.city}, {self.state}"
-            elif self.category == Category.ADDRESS:
-                self.display_secondary = f"{self.city}, {self.state}"
-            else:
-                self.display_secondary = f"{self.city}, {self.state}"
+        # Handle US state-only searches
+        if self.category == Category.STATE and not self.city and self.state in US_STATES:
+            capital = STATE_CAPITALS.get(self.state, "")
+            if capital:
+                location_parts.append(capital)
+                location_parts.append(self.state)
+        # Handle international locations
+        elif self.city:
+            location_parts.append(self.city)
+            # For international cities, include state only if it exists
+            if self.state:
+                location_parts.append(self.state)
+            # Always show country for international locations
+            if self.country and self.country not in ["United States", "USA", ""]:
+                location_parts.append(self.country)
+        elif self.state:
+            # State without city (US assumed if no country)
+            location_parts.append(self.state)
+            if self.country and self.country not in ["United States", "USA", ""]:
+                location_parts.append(self.country)
+        elif self.country:
+            # Country only
+            location_parts.append(self.country)
         
-        # Set full display
-        if not self.display_full:
-            if self.landmark_name:
-                self.display_full = f"{self.landmark_name} - {self.city}, {self.state}"
-            elif self.address:
-                self.display_full = f"{self.address}, {self.city}, {self.state}"
-            else:
-                if self.city:
-                    self.display_full = f"{self.city}, {self.state}"
-                else:
-                    self.display_full = self.state
+        return ", ".join(location_parts) if location_parts else "Unknown Location"
+    
+    @property
+    def display_full(self) -> str:
+        """Full display text with all details"""
+        parts = []
+        
+        # Add primary identifier (landmark/street)
+        if self.landmark_name:
+            parts.append(self.landmark_name)
+            if self.city or self.state or self.country:
+                parts.append("-")
+        elif self.street:
+            parts.append(self.street)
+            if self.city or self.state or self.country:
+                parts.append(",")
+        
+        # Add location hierarchy
+        location_parts = []
+        if self.neighborhood and self.neighborhood != self.street:
+            location_parts.append(self.neighborhood)
+        if self.city:
+            location_parts.append(self.city)
+        if self.state:
+            location_parts.append(self.state)
+        if self.country and self.country not in ["United States", "USA", ""]:
+            location_parts.append(self.country)
+        
+        # Join location parts
+        if location_parts:
+            parts.append(", ".join(location_parts))
+        
+        # Clean up formatting
+        result = " ".join(parts)
+        result = result.replace(" - ,", " - ")
+        result = result.replace(" , ", ", ")
+        result = result.replace("  ", " ")
+        
+        return result.strip() if result.strip() else "Unknown Location"
     
     def to_dict(self) -> dict:
         return {
@@ -691,7 +749,7 @@ class SmartLocation:
             'city': self.city,
             'state': self.state,
             'landmark_name': self.landmark_name,
-            'address': self.address,
+            'street': self.street,
             'gps_lat': self.gps_lat,
             'gps_lon': self.gps_lon,
             'display_primary': self.display_primary,
@@ -699,7 +757,11 @@ class SmartLocation:
             'display_full': self.display_full,
             'category': self.category.name if self.category else None,
             'use_count': self.use_count,
-            'last_used': self.last_used.isoformat() if self.last_used else None
+            'last_used': self.last_used.isoformat() if self.last_used else None,
+            'country': self.country,
+            'country_code': self.country_code,
+            'postal_code': self.postal_code,
+            'neighborhood': self.neighborhood
         }
 
 # ============================================================================
@@ -752,6 +814,13 @@ class PhotoDatabase:
                     current_city TEXT,
                     current_state TEXT,
                     current_location_source TEXT,
+                    
+                    -- New location fields
+                    current_country TEXT,
+                    current_country_code TEXT,
+                    current_street TEXT,
+                    current_postal_code TEXT,
+                    current_neighborhood TEXT,
                     
                     user_action TEXT DEFAULT 'none', -- 'saved', 'skipped', 'none'
                     user_last_action_time TIMESTAMP,
@@ -807,16 +876,17 @@ class PhotoDatabase:
                     city TEXT NOT NULL,
                     state TEXT NOT NULL,
                     landmark_name TEXT DEFAULT '',
-                    address TEXT DEFAULT '',
+                    street TEXT DEFAULT '',
                     gps_lat REAL,
                     gps_lon REAL,
-                    display_primary TEXT NOT NULL,
-                    display_secondary TEXT NOT NULL,
-                    display_full TEXT NOT NULL,
+                    country TEXT DEFAULT '',
+                    country_code TEXT DEFAULT '',
+                    postal_code TEXT DEFAULT '',
+                    neighborhood TEXT DEFAULT '',
                     category TEXT NOT NULL,
                     use_count INTEGER DEFAULT 1,
                     last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(city, state, landmark_name, address)
+                    UNIQUE(city, state, country, landmark_name, street)
                 )
             ''')
             
@@ -964,6 +1034,13 @@ class PhotoDatabase:
                 'current_location_source': new_location_source,
                 'location_id': location_id,
                 
+                # New location fields
+                'current_country': location_info.country if location_info else (current['current_country'] if 'current_country' in current else ''),
+                'current_country_code': location_info.country_code if location_info else (current['current_country_code'] if 'current_country_code' in current else ''),
+                'current_street': location_info.street if location_info else (current['current_street'] if 'current_street' in current else ''),
+                'current_postal_code': location_info.postal_code if location_info else (current['current_postal_code'] if 'current_postal_code' in current else ''),
+                'current_neighborhood': location_info.neighborhood if location_info else (current['current_neighborhood'] if 'current_neighborhood' in current else ''),
+                
                 # Update user action tracking
                 'user_action': user_action,
                 'user_last_action_time': datetime.now().isoformat(),
@@ -1071,20 +1148,21 @@ class PhotoDatabase:
                 # Extract numeric sequence from end of filename for sorting
                 def get_sequence_number(filepath):
                     filename = Path(filepath).name
-                    # Find the last underscore before .heic
                     base = filename.replace('.heic', '').replace('.HEIC', '')
                     parts = base.split('_')
                     if parts:
                         try:
                             return int(parts[-1])
                         except ValueError:
-                            return float('inf')  # Put non-numeric at end
+                            return float('inf')
                     return float('inf')
-                
-                results.sort(key=get_sequence_number)
+
+                # ↩︎  sort by (seq, filename) so identical seqs get a deterministic order
+                results.sort(key=lambda fp: (get_sequence_number(fp),
+                                             Path(fp).name.lower()))
             else:
                 # Sort by filename
-                results.sort(key=lambda fp: Path(fp).name)
+                results.sort(key=lambda fp: Path(fp).name.lower())
             
             return results
     
@@ -1139,36 +1217,32 @@ class LocationManager:
     def get_or_create_location(self, location: SmartLocation) -> int:
         # normalise nullable text fields once
         landmark = location.landmark_name or ''
-        address  = location.address or ''
-        lat      = location.gps_lat
-        lon      = location.gps_lon
+        street = location.street or ''
+        country = location.country or ''
+        lat = location.gps_lat
+        lon = location.gps_lon
 
         with self.db.get_db() as conn:
             result = conn.execute('''
                 SELECT id FROM locations 
                 WHERE city = ? AND state = ? 
+                AND IFNULL(country, '') = ?
                 AND IFNULL(landmark_name, '') = ?
-                AND IFNULL(address, '') = ?
-            ''', (location.city, location.state, landmark, address)).fetchone()
+                AND IFNULL(street, '') = ?
+            ''', (location.city, location.state, country, landmark, street)).fetchone()
             
             if result:
-                # Update display fields for existing location
-                conn.execute('''
-                    UPDATE locations 
-                    SET display_primary = ?, display_secondary = ?, display_full = ?
-                    WHERE id = ?
-                ''', (location.display_primary, location.display_secondary, 
-                    location.display_full, result[0]))
+                # Update usage count will be handled separately
                 return result[0]
             
             cursor = conn.execute('''
                 INSERT INTO locations (
-                    city, state, landmark_name, address, gps_lat, gps_lon,
-                    display_primary, display_secondary, display_full, category
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (location.city, location.state, landmark, address, lat, lon,
-                location.display_primary, location.display_secondary,
-                location.display_full, location.category.name if location.category else None))
+                    city, state, landmark_name, street, gps_lat, gps_lon,
+                    country, country_code, postal_code, neighborhood, category
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (location.city, location.state, landmark, street, lat, lon,
+                location.country, location.country_code, location.postal_code,
+                location.neighborhood, location.category.name if location.category else 'POI'))
             
             return cursor.lastrowid
     
@@ -1193,12 +1267,17 @@ class LocationManager:
         query_lower = query.lower()
         
         with self.db.get_db() as conn:
+            # Search across multiple fields since display_full is now computed
             db_results = conn.execute('''
                 SELECT * FROM locations
-                WHERE display_full LIKE ?
+                WHERE city LIKE ? 
+                   OR state LIKE ? 
+                   OR landmark_name LIKE ? 
+                   OR street LIKE ?
+                   OR country LIKE ?
                 ORDER BY use_count DESC
                 LIMIT 10
-            ''', (f'%{query}%',)).fetchall()
+            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
             
             for row in db_results:
                 results.append(self._row_to_location(row))
@@ -1226,16 +1305,17 @@ class LocationManager:
             id=row['id'],
             city=row['city'],
             state=row['state'],
-            landmark_name=row['landmark_name'],
-            address=row['address'],
-            gps_lat=row['gps_lat'],
-            gps_lon=row['gps_lon'],
-            display_primary=row['display_primary'],
-            display_secondary=row['display_secondary'],
-            display_full=row['display_full'],
-            category=None,  # Don't load category from DB
-            use_count=row['use_count'],
-            last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None
+            landmark_name=row['landmark_name'] if 'landmark_name' in row.keys() else '',
+            street=row['street'] if 'street' in row.keys() else '',
+            gps_lat=row['gps_lat'] if 'gps_lat' in row.keys() else None,
+            gps_lon=row['gps_lon'] if 'gps_lon' in row.keys() else None,
+            country=row['country'] if 'country' in row.keys() else '',
+            country_code=row['country_code'] if 'country_code' in row.keys() else '',
+            postal_code=row['postal_code'] if 'postal_code' in row.keys() else '',
+            neighborhood=row['neighborhood'] if 'neighborhood' in row.keys() else '',
+            category=Category[row['category']] if 'category' in row.keys() and row['category'] else None,
+            use_count=row['use_count'] if 'use_count' in row.keys() else 0,
+            last_used=datetime.fromisoformat(row['last_used']) if 'last_used' in row.keys() and row['last_used'] else None
         )
 
 # ============================================================================
@@ -1259,7 +1339,6 @@ class Gazetteer:
             return
         
         try:
-            import csv
             tf = TimezoneFinder(in_memory=True)
             
             with open(csv_path, 'r', encoding='utf-8') as f:
@@ -1387,139 +1466,79 @@ def _run_on_main_thread(func, *args, **kwargs):
     
     return result_holder.get("value")
 
-def _search_poi(query: str) -> Optional[Tuple[float, float, str, str, str]]:
-    """Search for landmarks/POIs using MKLocalSearch."""
-    def _impl() -> Optional[Tuple[float, float, str, str, str]]:
-        if not _apple_geocoding_available or not _mk_local_search_available:
-            return _geocode_addr(query)
-
+def _geocode_location(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Unified geocoding function using MKLocalSearch for both addresses and POIs.
+    Returns: Dictionary with all available location data
+    """
+    def _impl() -> Optional[Dict[str, Any]]:
+        if not _mk_local_search_available:
+            logger.warning(f"MKLocalSearch not available for query: {query}")
+            return None
+            
         _cooldown()
         try:
+            # Create search request
             req = MKLocalSearchRequest.alloc().init()
             req.setNaturalLanguageQuery_(query)
-
+            
+            # Create and start search
             search = MKLocalSearch.alloc().initWithRequest_(req)
-            finished, hit = False, None
-
+            finished, result = False, None
+            
             def handler(response, error):
-                nonlocal finished, hit
+                nonlocal finished, result
                 if error:
                     logger.warning(f"MKLocalSearch error for '{query}': {error}")
                 elif response and response.mapItems().count() > 0:
                     item = response.mapItems()[0]
                     pm = item.placemark()
-                    landmark = item.name() or ""
-                    hit = (
-                        pm.coordinate().latitude,
-                        pm.coordinate().longitude,
-                        pm.locality() or "",
-                        pm.administrativeArea() or "",
-                        landmark
-                    )
+                    
+                    # Get landmark name if available
+                    landmark = ""
+                    if hasattr(item, 'name') and item.name():
+                        landmark = item.name()
+                    elif not pm.locality() and not pm.administrativeArea():
+                        # If no city/state, this might be a POI search, use query as landmark
+                        landmark = query
+                    
+                    # Extract ALL available data from MKPlacemark
+                    result = {
+                        'lat': pm.coordinate().latitude,
+                        'lon': pm.coordinate().longitude,
+                        'city': pm.locality() or "",
+                        'state': pm.administrativeArea() or "",
+                        'country': pm.country() or "",
+                        'country_code': pm.ISOcountryCode() or "",
+                        'street_number': pm.subThoroughfare() or "",
+                        'street_name': pm.thoroughfare() or "",
+                        'street': f"{pm.subThoroughfare() or ''} {pm.thoroughfare() or ''}".strip(),
+                        'postal_code': pm.postalCode() or "",
+                        'neighborhood': pm.subLocality() or "",
+                        'county': pm.subAdministrativeArea() or "",
+                        'ocean': pm.ocean() if hasattr(pm, 'ocean') else "",
+                        'water': pm.inlandWater() if hasattr(pm, 'inlandWater') else "",
+                        'landmark_name': landmark,
+                        'query': query
+                    }
                 finished = True
-
+            
             search.startWithCompletionHandler_(handler)
-
-            start = time.time()
-            while not finished and time.time() - start < 5.0:
-                NSRunLoop.mainRunLoop().runUntilDate_(
-                    NSDate.dateWithTimeIntervalSinceNow_(0.05)
-                )
-
-            return hit
-
-        except objc.error as e:
-            logger.warning(f"Objective-C error in POI search '{query}': {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error in POI search '{query}': {e}")
-            return None
-
-    return _run_on_main_thread(_impl)
-
-def _geocode_addr(addr: str) -> Optional[Tuple[float, float, str, str]]:
-    """Forward-geocode an address with CLGeocoder."""
-    def _impl() -> Optional[Tuple[float, float, str, str]]:
-        if not _apple_geocoding_available or not _geocoder:
-            return None
-
-        _cooldown()
-        try:
-            finished, out, err = False, None, None
-
-            def handler(placemarks, error):
-                nonlocal finished, out, err
-                if error:
-                    err = error
-                elif placemarks and placemarks.count() > 0:
-                    pm = placemarks[0]
-                    out = (
-                        pm.location().coordinate().latitude,
-                        pm.location().coordinate().longitude,
-                        pm.locality() or "",
-                        pm.administrativeArea() or "",
-                    )
-                finished = True
-
-            _geocoder.geocodeAddressString_completionHandler_(addr, handler)
-
+            
+            # Wait for completion
             start = time.time()
             while not finished and time.time() - start < 5.0:
                 NSRunLoop.currentRunLoop().runUntilDate_(
                     NSDate.dateWithTimeIntervalSinceNow_(0.05)
                 )
-
-            if err:
-                logger.warning(f"CLGeocoder error for '{addr}': {err.localizedDescription()}")
-                return None
-
-            return out
-
-        except objc.error as e:
-            logger.warning(f"Objective-C error geocoding '{addr}': {e}")
-            return None
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Unexpected error geocoding '{addr}': {e}")
+            logger.error(f"MKLocalSearch exception for '{query}': {e}")
             return None
-
+    
     return _run_on_main_thread(_impl)
-
-# ============================================================================
-# QUERY ROUTING
-# ============================================================================
-
-def _route_query(query: str) -> Category:
-    """Determine the intent of a search query"""
-    query = query.strip()
-    
-    # Check if it's just a 2-letter state code
-    if re.fullmatch(r"[A-Za-z]{2}", query) and query.upper() in US_STATES:
-        return Category.STATE
-    
-    # Check if it's a full state name
-    if query.lower() in STATE_NAME_TO_ABBR:
-        return Category.STATE
-    
-    # Check if it's an international country
-    if query.lower() in COUNTRIES_LIST:
-        return Category.COUNTRY
-    
-    # Check if it looks like City, ST (US format)
-    if re.search(r".+,\s*[A-Za-z]{2}$", query):
-        return Category.CITY
-    
-    # Check if it looks like City, Country (international format)
-    if "," in query:
-        parts = query.split(",", 1)
-        if len(parts) == 2 and parts[1].strip().lower() in COUNTRIES_LIST:
-            return Category.CITY
-    
-    # Check if it starts with numbers (likely an address)
-    if re.match(r"\d{1,5}\s+\w+", query):
-        return Category.ADDRESS
-    
-    # Default to POI
-    return Category.POI
 
 # ============================================================================
 # PHOTOPIPELINE CLASS
@@ -1877,12 +1896,8 @@ class PhotoPipeline:
             return False
     
     def _calculate_file_hash(self, filepath: Path) -> str:
-        """Calculate SHA256 hash of file"""
-        sha256_hash = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            for byte_block in iter(lambda: f.read(self.config['transfer']['chunk_size']), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
+        """Wrapper that delegates to the single canonical helper"""
+        return calculate_file_hash(filepath)
     
     @contextmanager
     def _get_ssh_connection(self):
@@ -3096,6 +3111,12 @@ def read_metadata_from_file(filepath: Path) -> Tuple[Optional[DateInfo], Optiona
             "-Subject",
             "-XMP:City",
             "-XMP:State",
+            "-XMP:Country",
+            "-IPTC:Country-PrimaryLocationName",
+            "-IPTC:Country-PrimaryLocationCode",
+            "-XMP:LocationCreatedPostalCode",
+            "-XMP:LocationCreatedSublocation",
+            "-XMP:LocationShownSublocation",
             "-GPSLatitude", "-GPSLongitude",
             "-GPSLatitudeRef", "-GPSLongitudeRef",
             "-Make",
@@ -3144,21 +3165,30 @@ def read_metadata_from_file(filepath: Path) -> Tuple[Optional[DateInfo], Optiona
             if lonR == 'W':
                 lon = -abs(float(lon))
 
-        # --- City / State -----------------------------------------------------------
+        # --- City / State / Country -----------------------------------------------------------
         city  = data.get('City', '')
         state = data.get('State', '')
+        country = data.get('Country') or data.get('Country-PrimaryLocationName', '')
+        country_code = data.get('Country-PrimaryLocationCode', '')
+        postal_code = data.get('LocationCreatedPostalCode', '')
+        neighborhood = data.get('LocationCreatedSublocation') or data.get('LocationShownSublocation', '')
 
         # Build LocationInfo if we have either GPS *or* State/City
         if (lat is not None and lon is not None) or state:
             location_info = LocationInfo(
-                city         = city,
-                state        = state,
-                city_source  = (DataSource.SYSTEM if city and not state else None),
-                state_source = (DataSource.SYSTEM if state else None),
-                gps_lat      = lat,
-                gps_lon      = lon,
-                gps_source   = (DataSource.SYSTEM if lat is not None else None)
-            )
+            city         = city,
+            state        = state,
+            city_source  = (DataSource.SYSTEM if city else None),
+            state_source = (DataSource.SYSTEM if state else None),
+            country      = country,
+            country_code = country_code.strip() if country_code else '',  # Remove padding
+            country_source = (DataSource.SYSTEM if country else None),
+            postal_code  = postal_code,
+            neighborhood = neighborhood,
+            gps_lat      = lat,
+            gps_lon      = lon,
+            gps_source   = (DataSource.SYSTEM if lat is not None else None)
+        )
 
         # Extract tags
         tags = []
@@ -3257,16 +3287,61 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
     
     # Location
     if location_info and location_info.state:
+        # IPTC fields (with length limits for Apple Photos compatibility)
+        if location_info.landmark_name:
+            args.append(f"-IPTC:Sub-location={location_info.landmark_name[:32]}")
+        elif location_info.neighborhood:
+            args.append(f"-IPTC:Sub-location={location_info.neighborhood[:32]}")
+        elif location_info.street:
+            args.append(f"-IPTC:Sub-location={location_info.street[:32]}")
+        
         if location_info.city:
+            args.append(f"-IPTC:City={location_info.city[:32]}")
             args.append(f"-XMP:City={location_info.city}")
         else:
+            args.append("-IPTC:City=")
             args.append("-XMP:City=")
-        args.append(f"-XMP:State={location_info.state}")
-        args.append("-XMP:Country=United States")
         
+        args.append(f"-IPTC:Province-State={location_info.state[:32]}")
+        args.append(f"-XMP:State={location_info.state}")
+        
+        # Handle country (Apple already provides it)
+        if location_info.country:
+            country = location_info.country
+            country_code = location_info.country_code
+            args.append(f"-IPTC:Country-PrimaryLocationName={country[:64]}")
+            args.append(f"-XMP:Country={country}")
+            
+            if country_code:
+                # IPTC requires exactly 3 chars - pad if needed
+                if len(country_code) == 2:
+                    country_code = country_code + " "
+                args.append(f"-IPTC:Country-PrimaryLocationCode={country_code[:3]}")
+                args.append(f"-XMP:CountryCode={country_code.strip()}")
+        
+        # XMP extended fields (no length limits)
+        if location_info.street:
+            args.append(f"-XMP:LocationShownSublocation={location_info.street}")
+        if location_info.postal_code:
+            args.append(f"-XMP:LocationCreatedPostalCode={location_info.postal_code}")
+        if location_info.neighborhood:
+            args.append(f"-XMP:LocationCreatedSublocation={location_info.neighborhood}")
+        
+        # GPS coordinates
         if location_info.gps_lat is not None and location_info.gps_lon is not None:
             lat, lon = location_info.gps_lat, location_info.gps_lon
-            accuracy = "5" if location_info.gps_source == DataSource.USER else "100"
+            # Determine accuracy based on what type of search this was
+            if location_info.street:
+                accuracy = "10"  # Address-level accuracy
+            elif location_info.landmark_name:
+                accuracy = "25"  # POI accuracy
+            elif location_info.city:
+                accuracy = "1000"  # City-level accuracy
+            elif location_info.state or location_info.country:
+                accuracy = "5000"  # State/Country-level accuracy
+            else:
+                accuracy = "100"  # Default accuracy
+                
             args.extend([
                 f"-GPSLatitude={abs(lat)}",
                 f"-GPSLongitude={abs(lon)}",
@@ -3392,38 +3467,116 @@ def extract_date_from_filename(filename: str) -> Optional[Dict[str, str]]:
 
 def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
     """Extract location suggestion from filename"""
+    # Remove sequence numbers from end
     s = re.sub(r"_[0-9]{3,4}$", "", Path(filename).stem)
+    
+    # Remove common date patterns to avoid interference
+    # Patterns: Month_YYYY, DD_Month_YYYY, YYYY_MM_DD, etc.
+    date_patterns = [
+        r"_(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*_\d{4}",
+        r"_\d{1,2}_(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*_\d{4}",
+        r"_\d{4}_\d{2}_\d{2}",
+        r"_\d{2}_\d{2}_\d{4}"
+    ]
+    for pattern in date_patterns:
+        s = re.sub(pattern, "", s, flags=re.IGNORECASE)
     
     # Special cases with known proper capitalization
     if re.search(r"(?:^|_)PBG_FL(?:_|$)", s, re.IGNORECASE):
         return {
             'city': 'Palm Beach Gardens',
             'state': 'FL',
+            'country': '',
             'is_complete': True
         }
     if re.search(r"(?:^|_)ABQ_NM(?:_|$)", s, re.IGNORECASE):
         return {
             'city': 'Albuquerque',
             'state': 'NM',
+            'country': '',
             'is_complete': True
         }
     
-    # Pattern: City_ST
-    if m := re.search(r"(?:^|_)([A-Za-z]+)_([A-Za-z]{2})(?:_|$)", s, re.IGNORECASE):
-        city_raw, st = m.groups()
-        if st.upper() in US_STATES:
-            return {
-                'city': city_raw.title(),
-                'state': st.upper(),
-                'is_complete': True
-            }
+    # Split into words and search from right to left (locations usually at end)
+    words = s.split('_')
     
-    # Pattern: Just state
-    for st in re.findall(r"(?:^|_)([A-Za-z]{2})(?:_|$)", s, re.IGNORECASE):
-        if st.upper() in US_STATES:
+    # Look for location patterns starting from the end
+    for i in range(len(words) - 1, -1, -1):
+        # Skip if current word is too short
+        if len(words[i]) < 2:
+            continue
+            
+        # Pattern: City_State_Country (three consecutive location words)
+        if i >= 2:
+            potential_country = words[i]
+            potential_state = words[i-1]
+            potential_city = words[i-2]
+            
+            if (len(potential_state) == 2 and potential_state.upper() in US_STATES and
+                potential_country.lower() in COUNTRIES_LIST):
+                return {
+                    'city': potential_city.title(),
+                    'state': potential_state.upper(),
+                    'country': potential_country.title(),
+                    'is_complete': True
+                }
+        
+        # Pattern: City_Country (two consecutive words where second is a country)
+        if i >= 1:
+            potential_country = words[i]
+            potential_city = words[i-1]
+            
+            if potential_country.lower() in COUNTRIES_LIST:
+                # Make sure the city isn't also a country (avoid France_France)
+                if potential_city.lower() not in COUNTRIES_LIST:
+                    return {
+                        'city': potential_city.title(),
+                        'state': '',
+                        'country': potential_country.title(),
+                        'is_complete': True
+                    }
+        
+        # Pattern: City_State (US locations)
+        if i >= 1:
+            potential_state = words[i]
+            potential_city = words[i-1]
+            
+            if len(potential_state) == 2 and potential_state.upper() in US_STATES:
+                return {
+                    'city': potential_city.title(),
+                    'state': potential_state.upper(),
+                    'country': '',
+                    'is_complete': True
+                }
+    
+    # If no multi-word pattern found, look for single location identifiers
+    for i in range(len(words) - 1, -1, -1):
+        word = words[i]
+        
+        # Just a country
+        if word.lower() in COUNTRIES_LIST:
             return {
                 'city': '',
-                'state': st.upper(),
+                'state': '',
+                'country': word.title(),
+                'is_complete': False
+            }
+        
+        # Just a US state
+        if len(word) == 2 and word.upper() in US_STATES:
+            return {
+                'city': '',
+                'state': word.upper(),
+                'country': '',
+                'is_complete': False
+            }
+        
+        # Full state name
+        if word.lower() in STATE_NAME_TO_ABBR:
+            return {
+                'city': '',
+                'state': STATE_NAME_TO_ABBR[word.lower()],
+                'country': '',
                 'is_complete': False
             }
     
@@ -3569,13 +3722,15 @@ def get_current():
     location_suggestion = extract_location_from_filename(photo_path.name)
     
     # Correct city capitalization in location suggestion if found in gazetteer
-    if location_suggestion and location_suggestion.get('city') and STATE.gazetteer:
-        proper_names = STATE.gazetteer.get_proper_name(
-            location_suggestion['city'], 
-            location_suggestion['state']
-        )
-        if proper_names:
-            location_suggestion['city'] = proper_names[0]
+    if location_suggestion and location_suggestion.get('city') and location_suggestion.get('state') and STATE.gazetteer:
+        # Only correct US locations in gazetteer
+        if not location_suggestion.get('country') or location_suggestion['country'] in ["United States", "USA", ""]:
+            proper_names = STATE.gazetteer.get_proper_name(
+                location_suggestion['city'], 
+                location_suggestion['state']
+            )
+            if proper_names:
+                location_suggestion['city'] = proper_names[0]
     
     # Build response
     response = {
@@ -3646,13 +3801,20 @@ def get_current():
             ).fetchone()
             
             if loc_row:
+                # Create SmartLocation object to get computed display properties
+                location_obj = STATE.location_manager._row_to_location(loc_row)
                 smart_location = {
-                    'id': loc_row['id'],
-                    'display_primary': loc_row['display_primary'],
-                    'display_secondary': loc_row['display_secondary'],
-                    'display_full': loc_row['display_full'],
-                    'category': loc_row['category'],
-                    'use_count': loc_row['use_count']
+                    'id': location_obj.id,
+                    'display_primary': location_obj.display_primary,
+                    'display_secondary': location_obj.display_secondary,
+                    'display_full': location_obj.display_full,
+                    'category': location_obj.category.name if location_obj.category else None,
+                    'use_count': location_obj.use_count,
+                    'city': location_obj.city,
+                    'state': location_obj.state,
+                    'country': location_obj.country,
+                    'street': location_obj.street,
+                    'landmark_name': location_obj.landmark_name
                 }
                 response['smart_location'] = smart_location
     
@@ -3703,63 +3865,69 @@ def search_locations():
     if len(query) < 2:
         return jsonify([])
     
-    # Route the query
-    category = _route_query(query)
+    # Determine category based on query pattern (for display purposes only)
+    category = None
+    query_parts = [p.strip() for p in query.split(",")]
+    
+    if re.fullmatch(r"[A-Za-z]{2}", query) and query.upper() in US_STATES:
+        category = Category.STATE
+    elif query.lower() in STATE_NAME_TO_ABBR:
+        category = Category.STATE
+    elif query.lower() in COUNTRIES_LIST:
+        category = Category.COUNTRY
+    elif re.match(r"\d{1,5}\s+\w+", query):
+        category = Category.ADDRESS
+    elif len(query_parts) >= 2:
+        # Multi-part query - could be city,state or city,country
+        if len(query_parts) == 2 and query_parts[1].upper() in US_STATES:
+            category = Category.CITY  # US city
+        elif len(query_parts) >= 2 and query_parts[-1].lower() in COUNTRIES_LIST:
+            category = Category.CITY  # International city
+        else:
+            category = Category.CITY  # Generic multi-part
+    else:
+        category = Category.POI
+    
     results = []
 
-    def apply_search_category(location: SmartLocation, category: Category, query: str) -> SmartLocation:
-        """Apply the current search context to a location"""
-        location.category = category
-        
-        if category == Category.STATE:
-            location.display_primary = query.upper() if len(query) == 2 else query.title()
-            location.display_secondary = f"Will save as: {location.city}, {location.state}"
-        elif category == Category.CITY:
-            location.display_primary = f"{location.city}, {location.state}"
-            location.display_secondary = f"{location.city}, {location.state}"
-        elif category == Category.ADDRESS:
-            location.display_primary = location.address or query
-            location.display_secondary = f"{location.city}, {location.state}"
-        elif category == Category.POI:
-            location.display_primary = location.landmark_name or location.address or f"{location.city}, {location.state}"
-            location.display_secondary = f"{location.city}, {location.state}"
-        elif category == Category.COUNTRY:
-            location.display_primary = query.title()
-            if location.city:
-                location.display_secondary = f"Will save as: {location.city}, {location.state}"
-            else:
-                location.display_secondary = f"Will save as: {location.state}"
+    def create_smart_location_from_result(result: Dict[str, Any], category: Category = None) -> SmartLocation:
+        """Create SmartLocation from geocoding result"""
+        location = SmartLocation(
+            city=result.get('city', ''),
+            state=result.get('state', ''),
+            landmark_name=result.get('landmark_name', ''),
+            gps_lat=result.get('lat'),
+            gps_lon=result.get('lon'),
+            category=category,
+            # Apple provides country data for all locations
+            country=result.get('country', ''),
+            country_code=result.get('country_code', ''),
+            street=result.get('street', ''),
+            postal_code=result.get('postal_code', ''),
+            neighborhood=result.get('neighborhood', '')
+        )
         
         return location
     
-    if category == Category.STATE:
-        # Get state code
+    # Search Apple first for everything
+    geo_result = _geocode_location(query)
+    if geo_result:
+        # Special handling for US state searches
+        if category == Category.STATE:
+            state_code = query.upper() if len(query) == 2 else STATE_NAME_TO_ABBR.get(query.lower())
+            if state_code and not geo_result.get('city'):
+                # If searching for just a state and no city returned, use capital
+                geo_result['city'] = STATE_CAPITALS.get(state_code, "")
+            geo_result['state'] = state_code or geo_result.get('state', '')
+        
+        # Create location from result
+        location = create_smart_location_from_result(geo_result, category)
+        results.append(location)
+    
+    # Fallback for US states only
+    if not results and category == Category.STATE:
         state_code = query.upper() if len(query) == 2 else STATE_NAME_TO_ABBR.get(query.lower())
-        if not state_code:
-            return jsonify([])
-        
-        # Try Apple geocoding first
-        if _apple_geocoding_available:
-            geo_result = _geocode_addr(query)
-            if geo_result:
-                lat, lon, city, state = geo_result
-                # Use the city from geocoding or fall back to capital
-                actual_city = city or STATE_CAPITALS.get(state_code, "")
-                
-                results.append(SmartLocation(
-                    city=actual_city,
-                    state=state_code,
-                    gps_lat=lat,
-                    gps_lon=lon,
-                    category=Category.STATE,
-                    display_primary=query.title() if len(query) > 2 else query.upper(),
-                    display_secondary=f"{actual_city}, {state_code}"  # Remove "Will save as:"
-                ))
-                # Only show "Will save as:" during search
-                results[-1].display_secondary = f"Will save as: {results[-1].city}, {results[-1].state}"
-        
-        # Fallback to capital/CSV if no results
-        if not results:
+        if state_code:
             capital = STATE_CAPITALS.get(state_code, "")
             if capital and STATE.gazetteer:
                 gps_info = STATE.gazetteer.lookup(capital, state_code)
@@ -3775,120 +3943,14 @@ def search_locations():
                         display_secondary=f"Will save as: {capital}, {state_code}"
                     ))
     
-    elif category == Category.COUNTRY:
-        # For international locations, use Apple geocoding
-        if _apple_geocoding_available:
-            geo_result = _geocode_addr(query)
-            if geo_result:
-                lat, lon, city, state = geo_result
-                # For countries, state might be the country name
-                display_name = query.title()
-                if city:
-                    secondary = f"Will save as: {city}, {state or display_name}"
-                else:
-                    secondary = f"Will save as: {state or display_name}"
-                
-                results.append(SmartLocation(
-                    city=city or "",
-                    state=state or display_name,
-                    gps_lat=lat,
-                    gps_lon=lon,
-                    category=Category.COUNTRY,
-                    display_primary=display_name,
-                    display_secondary=f"{city or ''}, {state or display_name}" if city else (state or display_name)
-                ))
-                # Only show "Will save as:" during search
-                if city:
-                    results[-1].display_secondary = f"Will save as: {city}, {state or display_name}"
-                else:
-                    results[-1].display_secondary = f"Will save as: {state or display_name}"
-        else:
-            # Fallback when Apple geocoding unavailable
-            display_name = query.title()
-            results.append(SmartLocation(
-                city="",
-                state=display_name,
-                gps_lat=None,
-                gps_lon=None,
-                category=Category.COUNTRY,
-                display_primary=display_name,
-                display_secondary=f"Will save as: {display_name}"
-            ))
-    
-    elif category == Category.CITY:
-        # Search in database first
+    # Also search database for previously used locations
+    if not results or len(results) < 3:
         db_results = STATE.location_manager.search_locations(query)
         for loc in db_results[:3]:
-            # For city searches, ignore POI names - treat as city only
-            city_only_loc = SmartLocation(
-                id=loc.id,
-                city=loc.city,
-                state=loc.state,
-                landmark_name=None,  # Clear landmark for city searches
-                address=None,        # Clear address for city searches
-                gps_lat=loc.gps_lat,
-                gps_lon=loc.gps_lon,
-                use_count=loc.use_count,
-                last_used=loc.last_used
-            )
-            results.append(apply_search_category(city_only_loc, category, query))
-        
-        # Also try Apple geocoding if we have few results
-        if len(results) < 2 and _apple_geocoding_available:
-            geo_result = _geocode_addr(query)
-            if geo_result:
-                lat, lon, city, state = geo_result
-                if city and state:
-                    # Check if this city/state combo already exists
-                    exists = any(r.city == city and r.state == state for r in results)
-                    if not exists:
-                        results.append(SmartLocation(
-                            city=city,
-                            state=state,
-                            gps_lat=lat,
-                            gps_lon=lon,
-                            category=Category.CITY
-                        ))
-    
-    elif category == Category.ADDRESS:
-        # For addresses, use Apple geocoding
-        if _apple_geocoding_available:
-            geo_result = _geocode_addr(query)
-            if geo_result:
-                lat, lon, city, state = geo_result
-                results.append(SmartLocation(
-                    city=city,
-                    state=state,
-                    address=query,
-                    gps_lat=lat,
-                    gps_lon=lon,
-                    category=Category.ADDRESS,
-                    display_primary=query,
-                    display_secondary=f"{city}, {state}"
-                ))
-    
-    else:  # POI
-        # Try POI search first
-        if _apple_geocoding_available and _mk_local_search_available:
-            poi_result = _search_poi(query)
-            if poi_result and len(poi_result) == 5:
-                lat, lon, city, state, landmark = poi_result
-                results.append(SmartLocation(
-                    city=city,
-                    state=state,
-                    landmark_name=landmark,
-                    gps_lat=lat,
-                    gps_lon=lon,
-                    category=Category.POI,
-                    display_primary=landmark,
-                    display_secondary=f"{city}, {state}"
-                ))
-        
-        # Also search database for saved POIs
-        db_results = STATE.location_manager.search_locations(query)
-        for r in db_results[:2]:
-            if r.landmark_name:  # Only include actual POIs
-                results.append(apply_search_category(r, category, query))
+            # Don't duplicate if we already have this location
+            exists = any(r.city == loc.city and r.state == loc.state for r in results)
+            if not exists:
+                results.append(loc)
     
     # Deduplicate results
     seen = set()
@@ -3968,25 +4030,36 @@ def save_metadata():
             city=smart_location_data['city'],
             state=smart_location_data['state'],
             landmark_name=smart_location_data.get('landmark_name'),
-            address=smart_location_data.get('address'),
+            street=smart_location_data.get('street', ''),
             gps_lat=smart_location_data.get('gps_lat'),
             gps_lon=smart_location_data.get('gps_lon'),
-            category=Category[smart_location_data['category']] if smart_location_data.get('category') else None
+            category=Category[smart_location_data['category']] if smart_location_data.get('category') else None,
+            country=smart_location_data.get('country', ''),
+            country_code=smart_location_data.get('country_code', ''),
+            postal_code=smart_location_data.get('postal_code', ''),
+            neighborhood=smart_location_data.get('neighborhood', '')
         )
         
         # Get or create location record
         location_id = STATE.location_manager.get_or_create_location(smart_location)
         
-        # Create LocationInfo for file writing
+        # Create LocationInfo for file writing with country from search
         location_info = LocationInfo(
             city=smart_location.city,
             state=smart_location.state,
             city_source=DataSource.USER,
             state_source=DataSource.USER,
+            country=smart_location_data.get('country', ''),
+            country_code=smart_location_data.get('country_code', ''),
+            country_source=DataSource.USER if smart_location_data.get('country') else None,
+            street=smart_location_data.get('street', ''),
+            postal_code=smart_location_data.get('postal_code', ''),
+            neighborhood=smart_location_data.get('neighborhood', ''),
             gps_lat=smart_location.gps_lat,
             gps_lon=smart_location.gps_lon,
             gps_source=DataSource.USER if smart_location.gps_lat else None,
-            landmark_name=smart_location.landmark_name
+            landmark_name=smart_location.landmark_name,
+            landmark_source=DataSource.USER if smart_location.landmark_name else None
         )
     
     # Check if we should preserve camera data from frontend
@@ -4184,6 +4257,7 @@ def check_city():
 def toggle_sort():
     """Toggle between filename and sequence number sorting"""
     STATE.sort_by_sequence = not STATE.sort_by_sequence
+    STATE.current_index = 0        # ← new: restart at first item so the change is visible
     return jsonify({
         'success': True,
         'sort_by_sequence': STATE.sort_by_sequence
@@ -4777,16 +4851,13 @@ def initialize_session(folder_path: str):
     
     STATE.gazetteer = Gazetteer(gazetteer_path)
     
-    # Check Apple geocoding availability
-    if _apple_geocoding_available:
-        print("\n✓ Apple geocoding available")
-        print("  - CLGeocoder for addresses")
-        if _mk_local_search_available:
-            print("  - MKLocalSearch for landmarks and POIs")
-        else:
-            print("  - MKLocalSearch unavailable (using CLGeocoder for all queries)")
+    # Check MKLocalSearch availability
+    if _mk_local_search_available:
+        print("\n✓ Apple geocoding available via MKLocalSearch")
+        print("  - Address geocoding")
+        print("  - POI search")
     else:
-        print("\n⚠ Apple geocoding unavailable – using CSV only")
+        print("\n⚠ MKLocalSearch unavailable – using CSV only")
 
 # ============================================================================
 # MAIN FUNCTION
@@ -4797,18 +4868,32 @@ def main():
     if '--test' in sys.argv:
         print("Testing Apple geocoding…")
         try:
-            addr = _geocode_addr("1600 Amphitheatre Pkwy, Mountain View CA")
-            print(f"✓ Address test (CLGeocoder): {addr}")
-
-            poi = _search_poi("Golden Gate Bridge")
+            # Test with a simple query first
+            print("Testing MKLocalSearch availability...")
             if _mk_local_search_available:
-                print(f"✓ POI test (MKLocalSearch): {poi}")
+                print("✓ MKLocalSearch is available")
             else:
-                print(f"✓ POI test (CLGeocoder fallback): {poi}")
+                print("✗ MKLocalSearch is NOT available")
+                
+            addr = _geocode_location("1600 Amphitheatre Pkwy, Mountain View CA")
+            if addr:
+                lat, lon, city, state, landmark = addr
+                print(f"✓ Address test: {city}, {state} ({lat:.4f}, {lon:.4f})")
+            else:
+                print("✗ Address test failed")
+
+            poi = _geocode_location("Golden Gate Bridge")
+            if poi:
+                lat, lon, city, state, landmark = poi
+                print(f"✓ POI test: {landmark or 'Golden Gate Bridge'} in {city}, {state}")
+            else:
+                print("✗ POI test failed")
 
             print("All tests passed!")
         except Exception as e:
             print(f"✗ Test failed: {e}")
+            import traceback
+            traceback.print_exc()
         sys.exit(0)
 
     if len(sys.argv) < 2:
