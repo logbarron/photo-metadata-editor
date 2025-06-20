@@ -221,6 +221,13 @@ python3 --version
 
 If outdated, uv will handle it automatically.
 
+### Filename Format
+
+For best results with smart detection, name your files:
+`Description_City_ST_Month_Day_Year_Sequence.heic`
+
+Example: `Birthday_Party_Denver_CO_June_15_1995_0001.heic`
+
 ## Two Parts of This Tool
 
 This tool has two distinct components:
