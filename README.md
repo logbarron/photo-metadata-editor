@@ -64,7 +64,7 @@ The web interface opens at http://localhost:5555
 ## Documentation
 
 - [Setup Guide](docs/setup.md) - Installation and configuration
-- [User Guide](docs/guide.md) - Complete usage instructions
+- [User Guide](docs/user-guide.md) - Complete usage instructions
 - [Technical Reference](docs/reference.md) - Architecture, troubleshooting, performance
 - [Pipeline Setup](docs/pipeline.md) - Mac-to-Mac transfer system
 - [Development Notes](docs/development.md) - Design decisions and background
