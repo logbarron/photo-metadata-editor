@@ -45,21 +45,11 @@ Click any filter to view those photos. **Click the active filter again to enter 
 
 The tool detects dates and locations in filenames:
 
-**Date Detection:**
-
-| Filename Pattern | Detected Date | Complete? |
-|-----------------|---------------|-----------|
-| `July_4_1995_BBQ.heic` | July 4, 1995 | Yes |
-| `1995-07-04.heic` | July 4, 1995 | Yes |
-| `vacation_1995.heic` | 1995 only | No (month/day set to 01/02) |
-
-**Location Detection:**
-
-| Filename Pattern | Detected Location | Complete? |
-|-----------------|------------------|-----------|
-| `Chicago_IL_sunset.heic` | Chicago, IL | Yes |
-| `vacation_FL_2023.heic` | FL | No (state only) |
-| `PBG_FL_home.heic` | Palm Beach Gardens, FL | Yes |
+| Filename Pattern | Detected Date | Detected Location |
+|-----------------|---------------|-------------------|
+| `Birthday_Chicago_IL_July_4_1995_0871.heic` | July 4, 1995 | Chicago, IL |
+| `Vacation_FL_1995_041.heic` | 1995 only | FL |
+| `Trip_1995_07_04_1001.heic` | July 4, 1995 | None |
 
 When detected, blue suggestion buttons appear for both date and location.
 
