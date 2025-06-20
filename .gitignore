@@ -82,3 +82,7 @@ ENV/
 !docs/**
 !code/.env.example.txt
 !pipeline_config.example.json
+
+# Allow documentation images
+!docs/assets/images/**
+!assets/images/**
