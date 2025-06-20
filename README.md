@@ -12,7 +12,8 @@ When you photograph or scan prints and negatives, the date and location informat
 
 ## Features
 
-- **Smart Date Detection** - Extracts dates from filenames (`July_4_1995.heic` → July 4, 1995)
+- **Smart Date and Location Detection** - Extracts dates and locations from filenames following the pattern `Description_City_ST_Month_Day_Year_Sequence.heic`
+  - Example: `Family_Reunion_Chicago_IL_July_4_1995_0351.heic` → Chicago, IL + July 4, 1995
 - **Smart Location Detection** - Extracts locations from filenames (`Chicago_IL.heic` → Chicago, IL)
 - **Location Search** - Add location using Apple Maps integration (cities, landmarks, addresses)
 - **Grid View** - Browse and select multiple photos with 50-per-page pagination
