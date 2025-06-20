@@ -1,0 +1,84 @@
+# Photo Metadata Editor - Git Ignore File
+
+# Configuration files (user-specific, auto-generated)
+/code/.env
+/data/pipeline_config.json
+
+# Database and runtime data
+/data/photo_metadata.db
+/data/photo_metadata.db-wal
+/data/photo_metadata.db-shm
+/data/apple_geocode_cache.csv
+/data/thumbnails/
+/data/uscities.csv
+
+# Downloaded tools
+/tools/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+ENV/
+.venv
+.uv/
+.python-version
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Photos (don't commit photos)
+*.heic
+*.HEIC
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.png
+*.PNG
+*.tiff
+*.TIFF
+*.raw
+*.RAW
+*.dng
+*.DNG
+
+# Temporary directories
+/ToSend/
+/reports/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.nova/
+
+# Logs
+*.log
+*.log.*
+
+# Backup files
+*.bak
+*.backup
+*_backup/
+
+# Test directories
+/test_photos/
+/test_data/
+
+# Keep structure and examples
+!.gitkeep
+!docs/**
+!code/.env.example.txt
+!pipeline_config.example.json

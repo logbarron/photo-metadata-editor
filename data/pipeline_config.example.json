@@ -1,0 +1,31 @@
+{
+    "mac_b": {
+        "host": "pipeline@mac-b.local",
+        "mac_address": "XX:XX:XX:XX:XX:XX",
+        "ssh_key_path": "~/.ssh/pipeline_key",
+        "wake_wait_time": 10,
+        "connection_timeout": 60
+    },
+    "transfer": {
+        "batch_size_limit": null,
+        "timeout_seconds": 300,
+        "timeout_per_photo": 30,
+        "retry_count": 2,
+        "retry_delay": 5,
+        "chunk_size": 65536
+    },
+    "paths": {
+        "staging_dir": "~/ToSend",
+        "remote_incoming": "~/IncomingPhotos",
+        "remote_processed": "~/ProcessedPhotos",
+        "remote_reports": "~/ImportReports",
+        "local_reports": "~/reports"
+    },
+    "cleanup": {
+        "keep_successful_days": 0,
+        "keep_failed_days": 0,
+        "clean_import_log": true,
+        "clean_incoming_after_hours": 0.25,
+        "startup_cleanup": true
+    }
+}
