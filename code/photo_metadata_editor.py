@@ -14,7 +14,7 @@
 # ]
 # ///
 """
-Photo Metadata Editor - Add date and location metadata to digitized photos
+Photo Metadata Editor - Add date and location metadata to digitized negatives and prints 
 Copyright (C) 2025 Logan Barron
 
 This program is free software: you can redistribute it and/or modify
@@ -416,7 +416,7 @@ class AppState:
         self.pipeline_output: List[str] = []
         self.pipeline_batch_id: Optional[str] = None
         
-        # New integrated pipeline infrastructure
+        # Integrated pipeline infrastructure
         self.pipeline_executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1)
         self.pipeline_future: Optional[Future] = None
         self.pipeline_cancelled: bool = False
@@ -603,7 +603,7 @@ class LocationInfo:
     landmark_name: Optional[str] = None
     landmark_source: Optional[DataSource] = None
     
-    # New fields for international support
+    # Fields for international support
     country: str = ""
     country_code: str = ""
     country_source: Optional[DataSource] = None
@@ -815,7 +815,7 @@ class PhotoDatabase:
                     current_state TEXT,
                     current_location_source TEXT,
                     
-                    -- New location fields
+                    -- Location fields
                     current_country TEXT,
                     current_country_code TEXT,
                     current_street TEXT,
@@ -869,7 +869,7 @@ class PhotoDatabase:
                 )
             ''')
             
-            # Add new locations table
+            # Locations table
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS locations (
                     id INTEGER PRIMARY KEY,
@@ -909,7 +909,7 @@ class PhotoDatabase:
                 ON thumbnails(filepath, file_mtime, size)
             ''')
             
-            # ====== NEW: Import Pipeline Tables ======
+            # ====== Import Pipeline Tables ======
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS pipeline_queue (
                     id INTEGER PRIMARY KEY,
@@ -944,7 +944,7 @@ class PhotoDatabase:
                 )
             ''')
             
-            # ====== NEW: Create indexes for performance ======
+            # ====== Create indexes for performance ======
             conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_batch ON pipeline_queue(batch_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_status ON pipeline_queue(status)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_import_batch ON photos(import_batch_id)')
@@ -953,7 +953,7 @@ class PhotoDatabase:
             # Ensure updated_at is set for any existing rows
             conn.execute("UPDATE photos SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
             
-            # ====== NEW: Create trigger for automatic updated_at ======
+            # ====== Create trigger for automatic updated_at ======
             # Drop existing trigger first to avoid conflicts
             conn.execute('DROP TRIGGER IF EXISTS update_photos_timestamp')
             
@@ -1034,7 +1034,7 @@ class PhotoDatabase:
                 'current_location_source': new_location_source,
                 'location_id': location_id,
                 
-                # New location fields
+                # Location fields
                 'current_country': location_info.country if location_info else (current['current_country'] if 'current_country' in current else ''),
                 'current_country_code': location_info.country_code if location_info else (current['current_country_code'] if 'current_country_code' in current else ''),
                 'current_street': location_info.street if location_info else (current['current_street'] if 'current_street' in current else ''),
@@ -2544,7 +2544,7 @@ class PhotoPipeline:
             'message': f'✓ Database updated for {successful_imports}/{len(imported_files)} files'
         })
         
-        # NEW: Cleanup Mac B files after import
+        # Cleanup Mac B files after import
         self._cleanup_mac_b_files(batch_id, success=True)
     
     def _cleanup_mac_b_files(self, batch_id: str, success: bool = True):
@@ -2849,7 +2849,7 @@ class PhotoPipeline:
                     'message': 'Mac B setup incomplete, but continuing anyway...'
                 })
             
-            # NEW: Run startup cleanup after connection established
+            # Run startup cleanup after connection established
             if self.config.get('cleanup', {}).get('startup_cleanup', True):
                 self._cleanup_orphaned_files()
             
@@ -2938,7 +2938,7 @@ class PhotoPipeline:
             if batch_dir:
                 self.cleanup_staging(batch_dir)
             
-            # NEW: Also cleanup Mac B files for failed batch
+            # Also cleanup Mac B files for failed batch
             self._cleanup_mac_b_files(batch_id, success=False)
             
             return False
@@ -4079,7 +4079,7 @@ def save_metadata():
                 WHERE filepath = ?
             ''', (new_file_hash, new_file_mtime, filepath))
         
-        # Use new save method
+        # Use save method
         STATE.database.save_photo_state(
             filepath, 
             date_info, 
@@ -4257,7 +4257,7 @@ def check_city():
 def toggle_sort():
     """Toggle between filename and sequence number sorting"""
     STATE.sort_by_sequence = not STATE.sort_by_sequence
-    STATE.current_index = 0        # ← new: restart at first item so the change is visible
+    STATE.current_index = 0
     return jsonify({
         'success': True,
         'sort_by_sequence': STATE.sort_by_sequence
