@@ -21,18 +21,21 @@
 | Address | `123 Main St, Boston` | Specific address |
 | Country | `France` | Country location |
 
-## Date Patterns (Auto-Detected)
+## Filename Patterns (Auto-Detected)
 
-- `July_4_1995` → July 4, 1995
-- `July_1995` → July 1995
-- `1995-07-04` → July 4, 1995
-- `1995` → 1995 only
+**Recommended Format**: `Description_City_ST_Month_Day_Year_Sequence.heic`
 
-## Location Patterns (Auto-Detected)
+### Date Patterns
+- `Beach_Trip_July_4_1995_0041.heic` → July 4, 1995
+- `Vacation_July_1995_0701.heic` → July 1995
+- `Old_Photos_1995_0054.heic` → 1995 only
 
-- `Chicago_IL` → Chicago, IL
-- `Denver_CO` → Denver, CO
-- `_TX_` → Texas (state only)
+### Location Patterns
+- `Beach_Trip_Miami_FL_July_4_1995_0084.heic` → Miami, FL
+- `Vacation_Chicago_IL_7896.heic` → Chicago, IL
+- `Road_Trip_CA_0001.heic` → CA (state only)
+
+**Note**: Sequence numbers (_0001) are required for proper sorting and detection.
 
 ## Photo Sorting
 
