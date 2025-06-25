@@ -8,6 +8,8 @@ Before installing, ensure you have:
 
 - **macOS** (tested on Sequoia 15.5, requires macOS 10.15+)
 - **Xcode Command Line Tools** installed
+- **At least 8GB RAM** (4GB for the LLM model)
+- **5GB free disk space** (for LLM model download)
 - **Photos to process** in HEIC format
 - **Backup of your photos** (this tool modifies files permanently)
 
@@ -92,25 +94,39 @@ The tool automatically:
    - Required for reading/writing metadata
    - Installs to `tools/exiftool/`
 
-2. **Creates SQLite database** (`data/photo_metadata.db`)
+2. **Downloads LLM Model** (Mistral-7B, ~4GB)
+   - Required for intelligent filename parsing
+   - One-time download from Hugging Face
+   - Stores in `data/.llm_cache/`
+   - Shows progress: "Downloading model..."
+
+3. **Creates SQLite database** (`data/photo_metadata.db`)
    - Indexes all photos in the directory
    - Caches thumbnails for performance
    - Stores location history
+   - Caches LLM parsing results
 
-3. **Generates thumbnails**
+4. **Generates thumbnails**
    - Uses 10 parallel workers by default
    - Creates two sizes: 120x120 (grid) and 800x800 (preview)
    - Shows progress: "Generating thumbnails: 523/523 (100%)"
-   - Cached in database for fast access
 
-4. **Opens web interface**
+5. **Starts LLM parsing**
+   - Begins analyzing filenames for dates/locations
+   - First photo takes ~6 seconds (model warming up)
+   - Second photo takes ~8 seconds (inference and +3 image cache)
+   - Subsequent photos are pre-processed in background
+
+6. **Opens web interface**
    - Launches at http://localhost:5555
    - Interface opens automatically
 
 First run processing time depends on photo count (approximate):
-- 100 photos: ~1 minute
-- 1,000 photos: ~3-5 minutes  
-- 10,000 photos: ~20-30 minutes (tested maximum)
+- 100 photos: ~5-10 minutes (includes model download)
+- 1,000 photos: ~10-15 minutes  
+- 10,000 photos: ~30-40 minutes (tested maximum)
+
+Note: The 4GB model download only happens once. Subsequent runs start much faster.
 
 ## Directory Structure
 
@@ -124,6 +140,7 @@ photo-metadata-editor/
 │   ├── photo_metadata.db           # Photo index and thumbnails
 │   ├── apple_geocode_cache.csv     # Location search cache (created on use)
 │   └── pipeline_config.json        # Pipeline settings (if using Part 2)
+│   └── .llm_cache                  # LLM model storage (if using)
 └── tools/                          # External tools (created)
     └── exiftool/                   # Metadata tool (auto-downloaded)
 ```
@@ -167,6 +184,9 @@ UNKNOWN_DAY=02
 
 # ExifTool version
 EXIFTOOL_VERSION=13.30
+
+# LLM Parser Settings (optional)
+LLM_PARSER_ENABLED=true
 ```
 
 **Note about Keywords**: The DATE_KEYWORD and LOCATION_KEYWORD are tags that the tool automatically adds to photos missing that information. These appear as keywords in Apple Photos, making it easy to find incomplete photos.
@@ -227,6 +247,17 @@ For best results with smart detection, name your files:
 `Description_City_ST_Month_Day_Year_Sequence.heic`
 
 Example: `Birthday_Party_Denver_CO_June_15_1995_0001.heic`
+
+### LLM Model Download Issues
+
+If the model download fails or hangs:
+
+1. **Check internet connection** - Need stable connection for 4GB download
+2. **Check disk space** - Need 5GB free in home directory
+3. **Disable LLM if needed (falls back to basic pattern matching)**:
+   - Edit code/.env
+   - Add LLM_PARSER_ENABLED=false
+   - Restart application
 
 ## Two Parts of This Tool
 

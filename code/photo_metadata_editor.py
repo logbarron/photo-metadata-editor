@@ -10,7 +10,10 @@
 #   "pyobjc-framework-CoreLocation",
 #   "pyobjc-framework-MapKit",
 #   "paramiko",
-#   "wakeonlan"
+#   "wakeonlan",
+#   "waitress",
+#   "llama-cpp-python",
+#   "huggingface-hub"
 # ]
 # ///
 """
@@ -49,6 +52,12 @@ import time
 import logging
 import atexit
 import sys
+import threading
+import queue
+import hashlib
+import tempfile
+import socket
+import webbrowser
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
@@ -56,12 +65,6 @@ from io import BytesIO
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
-import threading
-import queue
-import hashlib
-import tempfile
-import socket
-import webbrowser
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 
 # Third-party imports
@@ -79,6 +82,15 @@ from PyObjCTools import AppHelper
 # Pipeline integration imports
 import paramiko
 from wakeonlan import send_magic_packet
+
+# LLM parser imports
+try:
+    from llama_cpp import Llama
+    from huggingface_hub import hf_hub_download
+    _LLM_AVAILABLE = True
+except ImportError:
+    _LLM_AVAILABLE = False
+    print("Warning: LLM parser not available - install llama-cpp-python")
 
 # Register HEIF format
 pillow_heif.register_heif_opener()
@@ -118,6 +130,9 @@ EXIFTOOL_VERSION=13.30
 
 # Web interface port
 WEB_PORT=5555
+
+# LLM Parser Settings (optional)
+LLM_PARSER_ENABLED=true
 """
 
 # Load configuration from .env file
@@ -178,6 +193,9 @@ try:
     # Cache sizes
     METADATA_CACHE_SIZE = int(_env_config['METADATA_CACHE_SIZE'])
     THUMBNAIL_CACHE_SIZE = int(_env_config['THUMBNAIL_CACHE_SIZE'])
+    
+    # LLM Parser
+    USE_LLM_PARSER = _env_config.get('LLM_PARSER_ENABLED', 'true').lower() == 'true'
     
 except KeyError as e:
     print(f"ERROR: Missing required configuration: {e}")
@@ -417,7 +435,7 @@ class AppState:
         self.pipeline_batch_id: Optional[str] = None
         
         # Integrated pipeline infrastructure
-        self.pipeline_executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1)
+        self.pipeline_executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=min(4, (os.cpu_count() or 4)))
         self.pipeline_future: Optional[Future] = None
         self.pipeline_cancelled: bool = False
         self.pipeline_events: List[Dict[str, Any]] = []
@@ -426,6 +444,7 @@ class AppState:
         self.pipeline_ssh_connections: List[Any] = []
         self.pipeline_staging_dirs: List[Path] = []
         self.data_dir: Path = DATA_DIR
+        self.filename_parser = None 
         
         # Start database worker thread
         self._start_db_worker()
@@ -461,12 +480,31 @@ class AppState:
 
         self.db_worker_thread = threading.Thread(target=worker, daemon=True)
         self.db_worker_thread.start()
+    
+    def shutdown_db_worker(self):
+        """Cleanly shutdown the database worker thread"""
+        if hasattr(self, 'db_queue') and hasattr(self, 'db_worker_thread'):
+            self.db_queue.put(None)  # Send shutdown signal
+            self.db_worker_thread.join(timeout=5.0)
 
 # ============================================================================
 # GLOBAL STATE INSTANCE
 # ============================================================================
 
 STATE = AppState()
+
+# Register cleanup on exit
+import atexit
+atexit.register(lambda: STATE.shutdown_db_worker())
+
+def cleanup_database_connections():
+    if STATE.database and hasattr(STATE.database, '_pool'):
+        STATE.database._pool.close_idle_connections()
+
+atexit.register(cleanup_database_connections)
+# Ensure pipeline threads don’t keep the interpreter alive
+atexit.register(lambda: STATE.pipeline_executor.shutdown(wait=False, cancel_futures=True))
+
 
 # ============================================================================
 # GLOBAL VARIABLES
@@ -480,6 +518,21 @@ METADATA_CACHE = {}
 
 # Thumbnail cache
 THUMBNAIL_CACHE = {}
+
+# Thread safety locks for caches
+METADATA_CACHE_LOCK = threading.RLock()
+THUMBNAIL_CACHE_LOCK = threading.RLock()
+LOCATION_CACHE_LOCK = threading.RLock()
+
+# LLM parsing queue infrastructure
+LLM_PARSE_QUEUE = queue.PriorityQueue()
+LLM_PARSE_RESULTS = {}  # filepath -> {'status': 'pending'|'ready', 'result': data}
+MAX_LLM_PARSE_RESULTS = 5000 # Prevent unbounded growth
+LLM_WORKER_THREAD = None # keep references to every LLM worker
+LLM_WORKER_THREADS = []
+LLM_WORKER_STOP = threading.Event()
+MODEL_WARMED     = threading.Event()  # set after first priority-0 parse
+WARM_CONDITION   = threading.Condition()  # Proper synchronization
 
 # Try to import MKLocalSearch
 try:
@@ -765,6 +818,537 @@ class SmartLocation:
         }
 
 # ============================================================================
+# FILENAME PARSER CLASS (LLM-BASED)  
+# ============================================================================
+
+class FilenameParser:
+    """LLM-based filename parser for extracting metadata from photo filenames.
+    
+    Uses Mistral-7B Instruct v0.3 model to intelligently extract dates, locations, people,
+    events, and other metadata from filenames.
+    """
+    
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(exist_ok=True)
+        self.llm = None
+        self._parse_cache = {}  # In-memory cache: filename -> parsed result
+        self._max_cache_size = 1000  # Maximum cache entries
+        self._llm_lock = threading.Lock()  # Thread safety for LLM calls
+        
+        # Complex prompt focused on WHERE photos were taken
+        self.prompt_template = """
+Analyze this photo filename to determine WHERE the photo was taken.
+
+For each filename, think step by step:
+1. What is likely the SUBJECT of the photo? (what's in it)
+2. What is likely the LOCATION where it was taken?
+3. Are there any clues about the type of location? (restaurant, park, home, tourist spot, etc.)
+4. Is this a place you could find on a public map, or is it someone's personal property?
+
+Output JSON with these fields:
+
+{
+  "location_confidence": "high/medium/low/none",
+  "primary_search": "<best search query for Apple Maps>",
+  "alternate_search": "<backup search if primary is wrong>",
+  "location_type": "venue/landmark/city/address/unknown",
+  "location_context": "<explanation of your reasoning>",
+  
+  "extracted": {
+    "subject": "<what the photo is OF>",
+    "where_taken": "<where you think it was taken>",
+    "landmark_name": "<specific place name if mentioned>",
+    "city": "<city if found - keep abbreviations like NYC, SF, LA as-is>",
+    "state": "<2-letter code if US/Canada>",
+    "country": "<country if not US>",
+    "date_parts": {"year": null, "month": null, "day": null}
+  },
+  
+  "search_strategy": "venue_first/city_first/landmark_only/need_more_info"
+}
+
+Rules:
+- Set location_confidence="none" if location is: home, house, grandma's, grandpa's, or any personal/family place
+- For search queries, remove activity/event words: "Beach Vacation Cancun" → "Cancun"
+- Keep common city abbreviations unchanged: NYC stays NYC, SF stays SF, LA stays LA
+- Month names: Jan→"01", Feb→"02", Mar→"03", Apr→"04", May→"05", Jun→"06", Jul→"07", Aug→"08", Sep→"09", Oct→"10", Nov→"11", Dec→"12"
+- Extract ISO dates like 2023-05-15 as year:"2023", month:"05", day:"15"
+- Extract partial dates like 2023-05 as year:"2023", month:"05", day:null
+- For dates like "July 4th 2023", extract as year:"2023", month:"07", day:"04"
+- Trailing 3-4 digits are sequence numbers unless part of a year
+- Filename can have any extension (.heic, .jpg, .png, etc.)
+
+Examples:
+
+Filename: Medieval_Times_Orlando_FL_Nov_14_1996.heic
+{
+  "location_confidence": "high",
+  "primary_search": "Medieval Times, Orlando FL",
+  "alternate_search": "Orlando, FL", 
+  "location_type": "venue",
+  "location_context": "Medieval Times is a restaurant chain, this photo was likely taken at the Orlando location",
+  "extracted": {
+    "subject": "visit to Medieval Times",
+    "where_taken": "Medieval Times restaurant in Orlando",
+    "landmark_name": "Medieval Times",
+    "city": "Orlando",
+    "state": "FL",
+    "country": null,
+    "date_parts": {"year": "1996", "month": "11", "day": "14"}
+  },
+  "search_strategy": "venue_first"
+}
+
+Filename: Family_Reunion_Grandmas_House_July_4th_2023.jpg
+{
+  "location_confidence": "none",
+  "primary_search": null,
+  "alternate_search": null,
+  "location_type": "unknown",
+  "location_context": "This is a family gathering at someone's personal residence, not a searchable public location",
+  "extracted": {
+    "subject": "family reunion",
+    "where_taken": "grandma's house",
+    "landmark_name": null,
+    "city": null,
+    "state": null,
+    "country": null,
+    "date_parts": {"year": "2023", "month": "07", "day": "04"}
+  },
+  "search_strategy": "need_more_info"
+}
+
+Filename: {filename}
+"""
+
+    def load_model(self):
+        """Load the Mistral-7B Instruct v0.3 model (singleton pattern)."""
+        if self.llm is not None:
+            return self.llm
+
+        # ---- first-call synchronisation ----
+        with self._llm_lock:
+            if self.llm is not None:           # another thread won the race
+                return self.llm
+            try:
+                print("Downloading LLM model (first time only).")
+                model_path = hf_hub_download(
+                    repo_id="bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+                    filename="Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+                    cache_dir=self.cache_dir
+                )
+
+                print("Loading LLM model into memory.")
+                self.llm = Llama(
+                    model_path=str(model_path),
+                    n_ctx=2048,
+                    n_gpu_layers=-1,  # Use GPU if available
+                    verbose=False,
+                    n_threads=8
+                )
+                print("✓ LLM model loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load LLM model: {e}")
+                raise
+        return self.llm
+
+    def parse_filename(self, filename: str) -> dict:
+        """Parse a filename and return structured data.
+        
+        Args:
+            filename: Photo/video filename to parse
+            
+        Returns:
+            Dict with extracted metadata (see prompt for structure)
+        """
+        # Check cache first
+        if filename in self._parse_cache:
+            return self._parse_cache[filename]
+        
+        # Ensure model is loaded
+        if self.llm is None:
+            self.load_model()
+        
+        try:
+            # Format prompt
+            prompt = self.prompt_template.replace("{filename}", filename)
+            
+            # Generate response (thread-safe)
+            with self._llm_lock:
+                response = self.llm(
+                    prompt,
+                    max_tokens=400,  # Increased for richer output
+                    temperature=0.1,
+                    stop=["Filename:"],
+                    echo=False
+                )
+            
+            # Extract JSON from response
+            json_str = response['choices'][0]['text'].strip()
+            
+            # Parse JSON
+            result = json.loads(json_str)
+            
+            # Validate structure
+            if 'date' not in result or not isinstance(result['date'], dict):
+                result['date'] = {'year': None, 'month': None, 'day': None}
+            
+            # Cache result
+            self._parse_cache[filename] = result
+            
+            # Limit cache size to prevent memory issues
+            if len(self._parse_cache) > self._max_cache_size:
+                # Remove oldest entries (first 100)
+                for key in list(self._parse_cache.keys())[:100]:
+                    del self._parse_cache[key]
+            
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON from LLM for {filename}: {e}")
+            logger.debug(f"LLM output: {json_str}")
+            return self._empty_result()
+        except Exception as e:
+            logger.error(f"LLM parsing failed for {filename}: {e}")
+            return self._empty_result()
+    
+    def _empty_result(self) -> dict:
+        """Return empty result structure for complex format."""
+        return {
+            'location_confidence': 'none',
+            'primary_search': None,
+            'alternate_search': None,
+            'location_type': 'unknown',
+            'location_context': 'No location information found',
+            'extracted': {
+                'subject': None,
+                'where_taken': None,
+                'landmark_name': None,
+                'city': None,
+                'state': None,
+                'country': None,
+                'date_parts': {'year': None, 'month': None, 'day': None}
+            },
+            'search_strategy': 'need_more_info'
+        }
+    
+    def to_date_suggestion(self, llm_output: dict) -> Optional[Dict[str, str]]:
+        """Convert LLM output to date suggestion format.
+        
+        Now handles complex format with dates under extracted.date_parts.
+        
+        Returns:
+            Dict with year, month, day (as strings) and is_complete flag
+            Returns None if no date found
+        """
+        if not llm_output:
+            return None
+        
+        # Handle new complex format
+        date_parts = None
+        if 'extracted' in llm_output and isinstance(llm_output.get('extracted'), dict):
+            date_parts = llm_output['extracted'].get('date_parts', {})
+        
+        # Fallback to old format if needed
+        if not date_parts or not isinstance(date_parts, dict):
+            date_parts = llm_output.get('date', {})
+        
+        if not date_parts or not isinstance(date_parts, dict):
+            return None
+        
+        year = date_parts.get('year')
+        month = date_parts.get('month')
+        day = date_parts.get('day')
+        
+        # Convert to strings and handle None/null values
+        year = str(year) if year is not None else None
+        month = str(month) if month is not None else None
+        day = str(day) if day is not None else None
+        
+        if not year:
+            return None
+        
+        # Ensure 2-digit format for month/day
+        if month and len(month) == 1:
+            month = f'0{month}'
+        if day and len(day) == 1:
+            day = f'0{day}'
+        
+        return {
+            'year': year,
+            'month': month or '',
+            'day': day or '',
+            'is_complete': bool(month)  # Complete if has at least month
+        }
+    
+    def to_location_suggestion(self, llm_output: dict) -> Optional[Dict[str, str]]:
+        """Convert LLM output to location suggestion format.
+        
+        Complex approach: Use confidence and direct search queries.
+        Only suggest locations when we're confident they're actual locations.
+        
+        Returns:
+            Dict with search query and metadata, or None if no confident location
+        """
+        if not llm_output:
+            return None
+        
+        # Map confidence strings to numbers
+        confidence_map = {
+            "high": 85,
+            "medium": 60,
+            "low": 30,
+            "none": 0
+        }
+        
+        conf_str = llm_output.get("location_confidence", "none")
+        confidence = confidence_map.get(conf_str, 0)
+        
+        # Apply threshold
+        if confidence < 40:  # Too low confidence
+            return None
+        
+        # Get search queries
+        primary_search = llm_output.get("primary_search")
+        if not primary_search:
+            return None
+        
+        # Extract components for display
+        extracted = llm_output.get("extracted", {})
+        
+        return {
+            # Primary fields for complex approach
+            'confidence': confidence,
+            'primary_search': primary_search,
+            'alternate_search': llm_output.get("alternate_search"),
+            'location_type': llm_output.get("location_type"),
+            'reasoning': llm_output.get("location_context", ''),
+            
+            # Extracted components for display (using landmark_name to match backend)
+            'landmark_name': extracted.get("landmark_name", ''),
+            'city': extracted.get('city', ''),
+            'state': extracted.get('state', '').upper() if extracted.get('state') else '',
+            'country': extracted.get('country', ''),
+            
+            # For compatibility
+            'is_complete': confidence > 70
+        }
+    
+    def parse_filenames_batch(self, filenames: List[str], progress_callback=None):
+        """Parse multiple filenames efficiently.
+        
+        Args:
+            filenames: List of filenames to parse
+            progress_callback: Optional callback(current, total) for progress updates
+        """
+        total = len(filenames)
+        
+        for i, filename in enumerate(filenames):
+            if filename not in self._parse_cache:
+                self.parse_filename(filename)
+            
+            if progress_callback:
+                progress_callback(i + 1, total)
+
+# ============================================================================
+# LLM WORKER THREAD
+# ============================================================================
+
+def llm_worker_thread():
+    """Background thread to process LLM parse requests"""
+    logger.info("LLM worker thread started")
+    
+    while not LLM_WORKER_STOP.is_set():
+        try:
+            # Wait for work with timeout to check stop signal
+            priority, filepath, parse_type = LLM_PARSE_QUEUE.get(timeout=0.1)
+            
+            # Skip if already actively processing this filepath
+            if LLM_PARSE_RESULTS.get(filepath, {}).get('status') == 'processing':
+                continue
+
+            # Hold off on low-priority work until the first high-priority
+            #      job (priority 0) has finished warming the model.
+            if priority > 0 and not MODEL_WARMED.is_set():
+                # Wait properly instead of churning
+                with WARM_CONDITION:
+                    LLM_PARSE_QUEUE.put((priority, filepath, parse_type))  # re-queue once
+                    WARM_CONDITION.wait(timeout=1.0)  # Wait up to 1s
+                continue
+                
+            # Mark as pending
+            LLM_PARSE_RESULTS[filepath] = {'status': 'processing', 'result': None}
+            
+            # Check database cache first
+            if STATE.database:
+                with STATE.database.get_db() as conn:
+                    row = conn.execute('''
+                        SELECT suggestion_filename, suggested_date_year, suggested_date_month,
+                               suggested_date_day, suggested_date_complete, suggested_location_primary,
+                               suggested_location_alternate, suggested_location_city, suggested_location_state,
+                               suggested_location_confidence, suggested_location_type, suggested_location_reasoning,
+                               suggested_location_landmark
+                        FROM photos WHERE filepath = ?
+                    ''', (filepath,)).fetchone()
+                    
+                    # If cached and filename matches, use it
+                    if row and row['suggestion_filename'] == Path(filepath).name:
+                        cached_result = {
+                            'date': {
+                                'year': row['suggested_date_year'],
+                                'month': row['suggested_date_month'],
+                                'day': row['suggested_date_day'],
+                                'is_complete': bool(row['suggested_date_complete'])
+                            } if row['suggested_date_year'] else None,
+                            'location': {
+                                'primary_search': row['suggested_location_primary'],
+                                'alternate_search': row['suggested_location_alternate'],
+                                'city': row['suggested_location_city'],
+                                'state': row['suggested_location_state'],
+                                'confidence': row['suggested_location_confidence'],
+                                'location_type': row['suggested_location_type'],
+                                'reasoning': row['suggested_location_reasoning'],
+                                'landmark_name': row['suggested_location_landmark'],
+                                'is_complete': row['suggested_location_confidence'] > 70 if row['suggested_location_confidence'] else False
+                            } if row['suggested_location_primary'] else None
+                        }
+                        
+                        LLM_PARSE_RESULTS[filepath] = {'status': 'ready', 'result': cached_result}
+                        logger.debug(f"Used cached LLM suggestion for {filepath}")
+                        continue
+            
+            # Parse with LLM
+            try:
+                if STATE.filename_parser and _LLM_AVAILABLE:
+                    filename = Path(filepath).name
+                    llm_output = STATE.filename_parser.parse_filename(filename)
+                    
+                    # Convert to suggestion format
+                    date_suggestion = STATE.filename_parser.to_date_suggestion(llm_output)
+                    location_suggestion = STATE.filename_parser.to_location_suggestion(llm_output)
+                    
+                    result = {
+                        'date': date_suggestion,
+                        'location': location_suggestion
+                    }
+                    
+                    # Save to database
+                    if STATE.database:
+                        with STATE.database.get_db() as conn:
+                            data = {
+                                'suggested_date_year': date_suggestion['year'] if date_suggestion else None,
+                                'suggested_date_month': date_suggestion['month'] if date_suggestion else None,
+                                'suggested_date_day': date_suggestion['day'] if date_suggestion else None,
+                                'suggested_date_complete': date_suggestion['is_complete'] if date_suggestion else 0,
+                                'suggested_location_primary': location_suggestion['primary_search'] if location_suggestion else None,
+                                'suggested_location_alternate': location_suggestion.get('alternate_search') if location_suggestion else None,
+                                'suggested_location_city': location_suggestion['city'] if location_suggestion else None,
+                                'suggested_location_state': location_suggestion['state'] if location_suggestion else None,
+                                'suggested_location_confidence': location_suggestion.get('confidence', 0) if location_suggestion else None,
+                                'suggested_location_type': location_suggestion.get('location_type') if location_suggestion else None,
+                                'suggested_location_reasoning': location_suggestion.get('reasoning') if location_suggestion else None,
+                                'suggested_location_landmark': location_suggestion.get('landmark_name') if location_suggestion else None,
+                                'suggestion_parsed_at': datetime.now().isoformat(),
+                                'suggestion_filename': filename
+                            }
+                            
+                            set_clause = ', '.join([f'{k} = :{k}' for k in data.keys()])
+                            data['filepath'] = filepath
+                            
+                            conn.execute(
+                                f'UPDATE photos SET {set_clause} WHERE filepath = :filepath',
+                                data
+                            )
+                    
+                    LLM_PARSE_RESULTS[filepath] = {'status': 'ready', 'result': result}
+
+                    # First high-priority parse finished → release gate
+                    if priority == 0 and not MODEL_WARMED.is_set():
+                        MODEL_WARMED.set()
+                        with WARM_CONDITION:
+                            WARM_CONDITION.notify_all()  # Wake up waiting threads
+                    # --- trim the cache if it grows beyond the cap ---
+                    if len(LLM_PARSE_RESULTS) > MAX_LLM_PARSE_RESULTS:
+                        excess = len(LLM_PARSE_RESULTS) - MAX_LLM_PARSE_RESULTS
+                        for old_key in list(LLM_PARSE_RESULTS)[:excess]:
+                            status = LLM_PARSE_RESULTS[old_key]['status']
+                            if status in ('ready', 'error'):      # keep pendings
+                                del LLM_PARSE_RESULTS[old_key]
+                    # ------------------------------------------------
+                    logger.debug(f"LLM parsed {filepath}")
+                else:
+                    # No LLM available
+                    LLM_PARSE_RESULTS[filepath] = {
+                        'status': 'ready',
+                        'result': {'date': None, 'location': None}
+                    }
+
+                    if priority == 0 and not MODEL_WARMED.is_set():
+                        MODEL_WARMED.set()
+                    # --- trim the cache if it grows beyond the cap ---
+                    if len(LLM_PARSE_RESULTS) > MAX_LLM_PARSE_RESULTS:
+                        excess = len(LLM_PARSE_RESULTS) - MAX_LLM_PARSE_RESULTS
+                        for old_key in list(LLM_PARSE_RESULTS)[:excess]:
+                            status = LLM_PARSE_RESULTS[old_key]['status']
+                            if status in ('ready', 'error'):
+                                del LLM_PARSE_RESULTS[old_key]
+                    # ------------------------------------------------
+                    
+            except Exception as e:
+                logger.error(f"LLM parse failed for {filepath}: {e}")
+                LLM_PARSE_RESULTS[filepath] = {'status': 'error', 'result': None}
+                
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"LLM worker error: {e}")
+    
+    logger.info("LLM worker thread stopped")
+
+def start_llm_worker():
+    """Start the LLM worker thread if not already running"""
+    global LLM_WORKER_THREAD
+    
+    if LLM_WORKER_THREAD is None or not LLM_WORKER_THREAD.is_alive():
+        LLM_WORKER_STOP.clear()
+        MODEL_WARMED.clear()  # CRITICAL: Reset the gate for fresh start
+        
+        # Step 1 – start *one* warming worker
+        t0 = threading.Thread(target=llm_worker_thread, daemon=True)
+        t0.start()
+        LLM_WORKER_THREADS.append(t0)
+        LLM_WORKER_THREAD = t0
+
+        # Step 2 – Spawn second worker but with a delay
+        def _spawn_followers():
+            MODEL_WARMED.wait()                       # block until first parse done
+            time.sleep(2.0)  # Wait 2s after warm-up before adding second worker
+            follower_count = 1  # Just 1 additional worker for 2 total
+            for _ in range(follower_count):
+                t = threading.Thread(target=llm_worker_thread, daemon=True)
+                t.start()
+                LLM_WORKER_THREADS.append(t)
+            logger.info("Spawned %d additional LLM workers", follower_count)
+
+        threading.Thread(target=_spawn_followers, daemon=True).start()
+
+        logger.info("Started initial LLM worker thread")
+
+def stop_llm_worker():
+    """Stop the LLM worker thread"""
+    global LLM_WORKER_THREAD
+    
+    if LLM_WORKER_THREAD and LLM_WORKER_THREAD.is_alive():
+        LLM_WORKER_STOP.set()
+        LLM_WORKER_THREAD.join(timeout=5.0)
+        LLM_WORKER_THREAD = None
+        logger.info("Stopped LLM worker thread")
+
+# Register cleanup for LLM worker
+atexit.register(stop_llm_worker)
+
+# ============================================================================
 # PHOTODATABASE CLASS
 # ============================================================================
 
@@ -773,6 +1357,8 @@ class PhotoDatabase:
     
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self._pool = ConnectionPool(db_path)
+        self._last_pool_cleanup = time.time()
         self._init_db()
     
     def _init_db(self):
@@ -853,7 +1439,23 @@ class PhotoDatabase:
                     has_camera_metadata BOOLEAN DEFAULT 0,
                     original_make TEXT,
                     original_model TEXT,
-                    last_saved_at TIMESTAMP
+                    last_saved_at TIMESTAMP,
+                    
+                    -- LLM suggestion cache
+                    suggested_date_year TEXT,
+                    suggested_date_month TEXT,
+                    suggested_date_day TEXT,
+                    suggested_date_complete BOOLEAN DEFAULT 0,
+                    suggested_location_primary TEXT,
+                    suggested_location_alternate TEXT,
+                    suggested_location_city TEXT,
+                    suggested_location_state TEXT,
+                    suggested_location_confidence INTEGER,
+                    suggested_location_type TEXT,
+                    suggested_location_reasoning TEXT,
+                    suggested_location_landmark TEXT,
+                    suggestion_parsed_at TIMESTAMP,
+                    suggestion_filename TEXT
                 )
             ''')
             
@@ -966,24 +1568,34 @@ class PhotoDatabase:
                     UPDATE photos SET updated_at = CURRENT_TIMESTAMP WHERE filepath = NEW.filepath;
                 END
             ''')
+            
+            # Trigger for inserts
+            conn.execute('DROP TRIGGER IF EXISTS insert_photos_timestamp')
+            conn.execute('''
+                CREATE TRIGGER insert_photos_timestamp
+                AFTER INSERT ON photos
+                FOR EACH ROW
+                BEGIN
+                    UPDATE photos SET updated_at = CURRENT_TIMESTAMP WHERE filepath = NEW.filepath;
+                END
+            ''')
     
     @contextmanager
     def get_db(self):
-        """Database connection context manager"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        # Apply same pragmas as init for consistency
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=10000")
+        """Database connection context manager using connection pool"""
+        # Periodically close all connections to allow WAL cleanup
+        if time.time() - self._last_pool_cleanup > 60:  # Every 60 seconds
+            self._pool.close_idle_connections()
+            self._last_pool_cleanup = time.time()
+        
+        conn = self._pool.get_connection()
         try:
             yield conn
             conn.commit()
         except:
             conn.rollback()
             raise
-        finally:
-            conn.close()
+        # Note: Connection stays in pool, but we'll periodically clean them
     
     def save_photo_state(self, filepath: str, date_info: Optional[DateInfo], 
                         location_info: Optional[LocationInfo], user_action: str = 'saved',
@@ -1167,40 +1779,88 @@ class PhotoDatabase:
             return results
     
     def get_stats(self) -> Dict[str, int]:
-        """Get statistics"""
+        """Get statistics – single aggregate query to avoid DB lock bursts"""
         with self.get_db() as conn:
-            stats = {}
-            stats['total'] = conn.execute('SELECT COUNT(*) FROM photos').fetchone()[0]
-            stats['needs_review'] = conn.execute('''
-                SELECT COUNT(*) FROM photos 
-                WHERE user_action != 'saved'
-            ''').fetchone()[0]
-            stats['needs_both'] = conn.execute('''
-                SELECT COUNT(*) FROM photos 
-                WHERE user_action = 'saved'
-                AND needs_date = 1 AND needs_location = 1
-            ''').fetchone()[0]
-            stats['needs_date'] = conn.execute('''
-                SELECT COUNT(*) FROM photos 
-                WHERE user_action = 'saved'
-                AND needs_date = 1 AND needs_location = 0
-            ''').fetchone()[0]
-            stats['needs_location'] = conn.execute('''
-                SELECT COUNT(*) FROM photos 
-                WHERE user_action = 'saved'
-                AND needs_date = 0 AND needs_location = 1
-            ''').fetchone()[0]
-            stats['complete'] = conn.execute('''
-                SELECT COUNT(*) FROM photos 
-                WHERE user_action = 'saved'
-                AND needs_date = 0 AND needs_location = 0
-            ''').fetchone()[0]
-            # Removed view/edit tracking stats
-            stats['skipped'] = conn.execute('''
-                SELECT COUNT(*) FROM photos 
-                WHERE user_action = 'skipped'
-            ''').fetchone()[0]
-            return stats
+            row = conn.execute('''
+                SELECT
+                    COUNT(*)                                                         AS total,
+                    SUM(CASE WHEN user_action != 'saved' THEN 1 ELSE 0 END)          AS needs_review,
+                    SUM(CASE WHEN user_action = 'saved'
+                              AND needs_date = 1 AND needs_location = 1 THEN 1 END)  AS needs_both,
+                    SUM(CASE WHEN user_action = 'saved'
+                              AND needs_date = 1 AND needs_location = 0 THEN 1 END)  AS needs_date,
+                    SUM(CASE WHEN user_action = 'saved'
+                              AND needs_date = 0 AND needs_location = 1 THEN 1 END)  AS needs_location,
+                    SUM(CASE WHEN user_action = 'saved'
+                              AND needs_date = 0 AND needs_location = 0 THEN 1 END)  AS complete,
+                    SUM(CASE WHEN user_action = 'skipped' THEN 1 ELSE 0 END)         AS skipped
+                FROM photos
+            ''').fetchone()
+            return dict(row)
+
+
+class ConnectionPool:
+    """Thread-local connection pool for SQLite with proper cleanup"""
+    def __init__(self, db_path: Path, pool_size: int = 8):
+        self.db_path = db_path
+        self.pool_size = pool_size
+        self._local = threading.local()
+        self._all_connections = []  # Track all connections for cleanup
+        self._lock = threading.Lock()
+    
+    def get_connection(self):
+        """Get a connection for the current thread"""
+        if not hasattr(self._local, 'connection') or self._local.connection is None:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            self._local.connection = conn
+            
+            # Track this connection (with hard cap)
+            with self._lock:
+                self._all_connections.append(conn)
+                # --- NEW: enforce max pool size ---
+                if len(self._all_connections) > self.pool_size:
+                    old_conn = self._all_connections.pop(0)
+                    try:
+                        old_conn.close()
+                    except:
+                        pass
+                # -----------------------------------
+                
+        return self._local.connection
+    
+    def release_connection(self):
+        """Close and remove the connection held by the current thread"""
+        if hasattr(self._local, 'connection') and self._local.connection:
+            try:
+                self._local.connection.close()
+            except Exception:
+                pass
+            self._local.connection = None
+    
+    def close_idle_connections(self):
+        """Close connections that haven't been used recently"""
+        # For SQLite, we might want to close ALL connections periodically
+        # to allow WAL cleanup
+        with self._lock:
+            for conn in self._all_connections:
+                try:
+                    conn.close()
+                except:
+                    pass
+            self._all_connections.clear()
+        
+        # Clear thread-local references
+        if hasattr(self._local, 'connection'):
+            self._local.connection = None
+    
+    def __del__(self):
+        """Ensure connections are closed on shutdown"""
+        self.close_idle_connections()
+
 
 # ============================================================================
 # LOCATION MANAGER CLASS
@@ -1286,16 +1946,17 @@ class LocationManager:
     
     def _update_cache(self):
         # Only update if stale
-        now = time.time()
-        if now - self._last_cache_update < 60:  # Cache for 60 seconds
-            return
+        with LOCATION_CACHE_LOCK:
+            now = time.time()
+            if now - self._last_cache_update < 60:  # Cache for 60 seconds
+                return
             
-        with self.db.get_db() as conn:
-            frequent = conn.execute('''
-                SELECT * FROM locations
-                ORDER BY use_count DESC, last_used DESC
-                LIMIT 20
-            ''').fetchall()
+            with self.db.get_db() as conn:
+                frequent = conn.execute('''
+                    SELECT * FROM locations
+                    ORDER BY use_count DESC, last_used DESC
+                    LIMIT 20
+                ''').fetchall()
             
             self._frequent_cache = [self._row_to_location(row) for row in frequent]
             self._last_cache_update = now
@@ -3096,8 +3757,9 @@ def read_metadata_from_file(filepath: Path) -> Tuple[Optional[DateInfo], Optiona
     try:
         mtime = filepath.stat().st_mtime
         cache_key = f"{filepath}:{mtime}"
-        if cache_key in METADATA_CACHE:
-            return METADATA_CACHE[cache_key]
+        with METADATA_CACHE_LOCK:
+            if cache_key in METADATA_CACHE:
+                return METADATA_CACHE[cache_key]
     except:
         pass
     
@@ -3228,13 +3890,15 @@ def read_metadata_from_file(filepath: Path) -> Tuple[Optional[DateInfo], Optiona
         try:
             mtime = filepath.stat().st_mtime
             cache_key = f"{filepath}:{mtime}"
-            METADATA_CACHE[cache_key] = result
+            with METADATA_CACHE_LOCK:
+                METADATA_CACHE[cache_key] = result
             
             # Limit cache size
-            if len(METADATA_CACHE) > METADATA_CACHE_SIZE:
-                # Remove oldest entries
-                for key in list(METADATA_CACHE.keys())[:20]:
-                    del METADATA_CACHE[key]
+            with METADATA_CACHE_LOCK:
+                if len(METADATA_CACHE) > METADATA_CACHE_SIZE:
+                    # Remove oldest entries
+                    for key in list(METADATA_CACHE.keys())[:20]:
+                        del METADATA_CACHE[key]
         except:
             pass
         
@@ -3415,7 +4079,33 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
 # ============================================================================
 
 def extract_date_from_filename(filename: str) -> Optional[Dict[str, str]]:
-    """Extract date suggestion from filename"""
+    """Extract date suggestion from filename using LLM parser.
+    
+    Uses Mistral-7B Instruct v0.3 model to extract structured date information.
+    Falls back to regex parser if LLM is unavailable or fails.
+    
+    Args:
+        filename: Photo filename to parse
+        
+    Returns:
+        Dict with year, month, day (as strings) and is_complete flag
+        Returns None if no date found
+    """
+    if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE:
+        try:
+            llm_output = STATE.filename_parser.parse_filename(filename)
+            result = STATE.filename_parser.to_date_suggestion(llm_output)
+            if result:
+                logger.debug(f"LLM date extraction for {filename}: {result}")
+                return result
+        except Exception as e:
+            logger.warning(f"LLM date parser failed for {filename}: {e}")
+    
+    # Fallback to regex parser
+    return _extract_date_from_filename_regex(filename)
+
+def _extract_date_from_filename_regex(filename: str) -> Optional[Dict[str, str]]:
+    """Original regex-based date parser (backup)"""
     stem = Path(filename).stem
     s = re.sub(r"_[0-9]{3,4}$", "", stem, count=1)
     
@@ -3466,7 +4156,33 @@ def extract_date_from_filename(filename: str) -> Optional[Dict[str, str]]:
     return None
 
 def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
-    """Extract location suggestion from filename"""
+    """Extract location suggestion from filename using LLM parser.
+    
+    Uses Mistral-7B Instruct v0.3 model to extract structured location information.
+    Falls back to regex parser if LLM is unavailable or fails.
+    
+    Args:
+        filename: Photo filename to parse
+        
+    Returns:
+        Dict with city, state, country and is_complete flag
+        Returns None if no location found
+    """
+    if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE:
+        try:
+            llm_output = STATE.filename_parser.parse_filename(filename)
+            result = STATE.filename_parser.to_location_suggestion(llm_output)
+            if result:
+                logger.debug(f"LLM location extraction for {filename}: {result}")
+                return result
+        except Exception as e:
+            logger.warning(f"LLM location parser failed for {filename}: {e}")
+    
+    # Fallback to regex parser
+    return _extract_location_from_filename_regex(filename)
+
+def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, str]]:
+    """Original regex-based location parser (backup)"""
     # Remove sequence numbers from end
     s = re.sub(r"_[0-9]{3,4}$", "", Path(filename).stem)
     
@@ -3487,14 +4203,26 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
             'city': 'Palm Beach Gardens',
             'state': 'FL',
             'country': '',
-            'is_complete': True
+            'is_complete': True,
+            'confidence': 85,
+            'primary_search': 'Palm Beach Gardens, FL',
+            'alternate_search': 'FL',
+            'location_type': 'city',
+            'reasoning': 'Recognized city abbreviation',
+            'landmark_name': ''
         }
     if re.search(r"(?:^|_)ABQ_NM(?:_|$)", s, re.IGNORECASE):
         return {
             'city': 'Albuquerque',
             'state': 'NM',
             'country': '',
-            'is_complete': True
+            'is_complete': True,
+            'confidence': 85,
+            'primary_search': 'Albuquerque, NM',
+            'alternate_search': 'NM',
+            'location_type': 'city',
+            'reasoning': 'Recognized city abbreviation',
+            'landmark_name': ''
         }
     
     # Split into words and search from right to left (locations usually at end)
@@ -3518,7 +4246,13 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
                     'city': potential_city.title(),
                     'state': potential_state.upper(),
                     'country': potential_country.title(),
-                    'is_complete': True
+                    'is_complete': True,
+                    'confidence': 85,
+                    'primary_search': f"{potential_city.title()}, {potential_state.upper()}, {potential_country.title()}",
+                    'alternate_search': f"{potential_city.title()}, {potential_state.upper()}",
+                    'location_type': 'city',
+                    'reasoning': 'City, state, and country found',
+                    'venue_name': ''
                 }
         
         # Pattern: City_Country (two consecutive words where second is a country)
@@ -3533,7 +4267,13 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
                         'city': potential_city.title(),
                         'state': '',
                         'country': potential_country.title(),
-                        'is_complete': True
+                        'is_complete': True,
+                        'confidence': 85,
+                        'primary_search': f"{potential_city.title()}, {potential_country.title()}",
+                        'alternate_search': potential_country.title(),
+                        'location_type': 'city',
+                        'reasoning': 'International city and country found',
+                        'venue_name': ''
                     }
         
         # Pattern: City_State (US locations)
@@ -3546,7 +4286,13 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
                     'city': potential_city.title(),
                     'state': potential_state.upper(),
                     'country': '',
-                    'is_complete': True
+                    'is_complete': True,
+                    'confidence': 85,
+                    'primary_search': f"{potential_city.title()}, {potential_state.upper()}",
+                    'alternate_search': potential_state.upper(),
+                    'location_type': 'city',
+                    'reasoning': 'US city and state found',
+                    'venue_name': ''
                 }
     
     # If no multi-word pattern found, look for single location identifiers
@@ -3559,7 +4305,13 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
                 'city': '',
                 'state': '',
                 'country': word.title(),
-                'is_complete': False
+                'is_complete': False,
+                'confidence': 60,
+                'primary_search': word.title(),
+                'alternate_search': None,
+                'location_type': 'country',
+                'reasoning': 'Only country name found',
+                'venue_name': ''
             }
         
         # Just a US state
@@ -3568,7 +4320,13 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
                 'city': '',
                 'state': word.upper(),
                 'country': '',
-                'is_complete': False
+                'is_complete': False,
+                'confidence': 60,
+                'primary_search': word.upper(),
+                'alternate_search': None,
+                'location_type': 'state',
+                'reasoning': 'Only US state found',
+                'venue_name': ''
             }
         
         # Full state name
@@ -3577,7 +4335,13 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
                 'city': '',
                 'state': STATE_NAME_TO_ABBR[word.lower()],
                 'country': '',
-                'is_complete': False
+                'is_complete': False,
+                'confidence': 60,
+                'primary_search': STATE_NAME_TO_ABBR[word.lower()],
+                'alternate_search': None,
+                'location_type': 'state',
+                'reasoning': 'Only US state name found',
+                'venue_name': ''
             }
     
     return None
@@ -3596,8 +4360,9 @@ def create_thumbnail(image_path: Path, max_size=(800, 800)) -> Optional[str]:
     
     # Check memory cache first
     cache_key = f"{image_path}:{mtime}:{max_size[0]}x{max_size[1]}"
-    if cache_key in THUMBNAIL_CACHE:
-        return THUMBNAIL_CACHE[cache_key]
+    with THUMBNAIL_CACHE_LOCK:
+        if cache_key in THUMBNAIL_CACHE:
+            return THUMBNAIL_CACHE[cache_key]
     
     # Check database cache
     if STATE.database:
@@ -3615,20 +4380,22 @@ def create_thumbnail(image_path: Path, max_size=(800, 800)) -> Optional[str]:
     
     # Not in cache, generate it
     try:
-        img = Image.open(image_path)
-        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        with Image.open(image_path) as img:
+            img.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            if img.mode in ('RGBA', 'P'):
+                rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                rgb_img.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = rgb_img
+                        
+            buffer = BytesIO()
+            img.save(buffer, format='JPEG', quality=85)
         
-        if img.mode in ('RGBA', 'P'):
-            rgb_img = Image.new('RGB', img.size, (255, 255, 255))
-            rgb_img.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-            img = rgb_img
-        
-        buffer = BytesIO()
-        img.save(buffer, format='JPEG', quality=85)
         result = base64.b64encode(buffer.getvalue()).decode()
         
         # Save to memory cache
-        THUMBNAIL_CACHE[cache_key] = result
+        with THUMBNAIL_CACHE_LOCK:
+            THUMBNAIL_CACHE[cache_key] = result
         
         # Save to database
         if STATE.database:
@@ -3640,10 +4407,11 @@ def create_thumbnail(image_path: Path, max_size=(800, 800)) -> Optional[str]:
                 ''', (str(image_path), mtime, size_str, result))
         
         # Limit memory cache size
-        if len(THUMBNAIL_CACHE) > THUMBNAIL_CACHE_SIZE:
-            # Remove oldest entries from memory only (keep in DB)
-            for key in list(THUMBNAIL_CACHE.keys())[:100]:
-                del THUMBNAIL_CACHE[key]
+        with THUMBNAIL_CACHE_LOCK:
+            if len(THUMBNAIL_CACHE) > THUMBNAIL_CACHE_SIZE:
+                # Remove oldest entries from memory only (keep in DB)
+                for key in list(THUMBNAIL_CACHE.keys())[:100]:
+                    del THUMBNAIL_CACHE[key]
         
         return result
         
@@ -3717,9 +4485,91 @@ def get_current():
     else:
         location_info = file_location
     
-    # Get suggestions
-    date_suggestion = extract_date_from_filename(photo_path.name)
-    location_suggestion = extract_location_from_filename(photo_path.name)
+    # Get suggestions - check cache first, queue if needed
+    date_suggestion = None
+    location_suggestion = None
+    llm_status = 'ready'
+    
+    # Check if we have cached results in memory
+    if filepath in LLM_PARSE_RESULTS and LLM_PARSE_RESULTS[filepath]['status'] == 'ready':
+        result = LLM_PARSE_RESULTS[filepath]['result']
+        date_suggestion = result.get('date')
+        location_suggestion = result.get('location')
+    else:
+        # Check database cache before queuing
+        db_cached = False
+        if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE and STATE.database:
+            with STATE.database.get_db() as conn:
+                row = conn.execute('''
+                    SELECT suggestion_filename, suggested_date_year, suggested_date_month,
+                           suggested_date_day, suggested_date_complete, suggested_location_primary,
+                           suggested_location_alternate, suggested_location_city, suggested_location_state,
+                           suggested_location_confidence, suggested_location_type, suggested_location_reasoning,
+                           suggested_location_landmark
+                    FROM photos WHERE filepath = ?
+                ''', (filepath,)).fetchone()
+                
+                if row and row['suggestion_filename'] == photo_path.name:
+                    # Found in database cache
+                    if row['suggested_date_year']:
+                        date_suggestion = {
+                            'year': row['suggested_date_year'],
+                            'month': row['suggested_date_month'],
+                            'day': row['suggested_date_day'],
+                            'is_complete': bool(row['suggested_date_complete'])
+                        }
+                    
+                    if row['suggested_location_primary']:
+                        location_suggestion = {
+                            'primary_search': row['suggested_location_primary'],
+                            'alternate_search': row['suggested_location_alternate'],
+                            'city': row['suggested_location_city'],
+                            'state': row['suggested_location_state'],
+                            'confidence': row['suggested_location_confidence'],
+                            'location_type': row['suggested_location_type'],
+                            'reasoning': row['suggested_location_reasoning'],
+                            'landmark_name': row['suggested_location_landmark'],
+                            'is_complete': row['suggested_location_confidence'] > 70 if row['suggested_location_confidence'] else False
+                        }
+                    
+                    # Cache in memory for next time
+                    LLM_PARSE_RESULTS[filepath] = {
+                        'status': 'ready',
+                        'result': {'date': date_suggestion, 'location': location_suggestion}
+                    }
+                    db_cached = True
+        
+        if not db_cached:
+            # Check if LLM will process this
+            if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE:
+                # Don't show regex results - show analyzing state instead
+                date_suggestion = None  # Will trigger "Analyzing" in UI
+                location_suggestion = None  # Will trigger "Analyzing" in UI
+                
+                # Queue LLM parse with high priority
+                LLM_PARSE_QUEUE.put((1 if not MODEL_WARMED.is_set() else 0, filepath, 'all'))
+                llm_status = 'pending'
+            else:
+                # Only use regex if LLM is completely unavailable
+                date_suggestion = _extract_date_from_filename_regex(photo_path.name)
+                location_suggestion = _extract_location_from_filename_regex(photo_path.name)
+                llm_status = 'ready'
+    
+    # Don't pre-queue on initial page load - only queue when navigating
+    if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE:
+        # Only pre-queue if this is a navigation (not initial load)
+        if hasattr(STATE, '_initial_load_complete'):
+            for i in range(1, 3):  # Only next 2 photos, not 5
+                next_index = STATE.current_index + i
+                if next_index < len(filtered_photos):
+                    next_filepath = filtered_photos[next_index]
+                    # Only queue if not already processed or queued
+                    if next_filepath not in LLM_PARSE_RESULTS:
+                        # Lower priority for pre-parsing
+                        LLM_PARSE_QUEUE.put((i, next_filepath, 'all'))
+        else:
+            # Mark initial load complete for next time
+            STATE._initial_load_complete = True
     
     # Correct city capitalization in location suggestion if found in gazetteer
     if location_suggestion and location_suggestion.get('city') and location_suggestion.get('state') and STATE.gazetteer:
@@ -3743,7 +4593,8 @@ def get_current():
         'stats': STATE.database.get_stats(),
         'date_suggestion': date_suggestion,
         'location_suggestion': location_suggestion,
-        'tags': file_tags
+        'tags': file_tags,
+        'llm_status': llm_status
     }
     
     # Add current metadata
@@ -3864,7 +4715,7 @@ def search_locations():
     query = request.json.get('query', '').strip()
     if len(query) < 2:
         return jsonify([])
-    
+
     # Determine category based on query pattern (for display purposes only)
     category = None
     query_parts = [p.strip() for p in query.split(",")]
@@ -3956,12 +4807,74 @@ def search_locations():
     seen = set()
     unique_results = []
     for r in results:
-        key = (r.city, r.state, r.landmark_name or r.address or "")
+        key = (r.city, r.state, r.landmark_name or r.street or "")
         if key not in seen:
             seen.add(key)
             unique_results.append(r)
     
     return jsonify([r.to_dict() for r in unique_results[:5]])
+
+@app.route('/api/suggestions/<path:filepath>')
+def get_suggestions(filepath):
+    """Get LLM parsing status/results for a specific photo"""
+    # Flask strips leading / from path params, so add it back for absolute paths
+    if not filepath.startswith('/') and len(filepath) > 2 and filepath[1] == '/':
+        # Looks like an absolute path missing its leading slash (e.g., "Users/...")
+        filepath = '/' + filepath
+    
+    # Check if we have results
+    if filepath in LLM_PARSE_RESULTS:
+        status = LLM_PARSE_RESULTS[filepath]['status']
+        
+        if status == 'ready':
+            result = LLM_PARSE_RESULTS[filepath]['result']
+            
+            # Apply gazetteer correction to location if available
+            if result.get('location') and STATE.gazetteer:
+                loc = result['location']
+                if loc.get('city') and loc.get('state') and not loc.get('country'):
+                    proper_names = STATE.gazetteer.get_proper_name(loc['city'], loc['state'])
+                    if proper_names:
+                        loc['city'] = proper_names[0]
+            
+            return jsonify({
+                'status': 'ready',
+                'date_suggestion': result.get('date'),
+                'location_suggestion': result.get('location')
+            })
+        else:
+            return jsonify({'status': status})
+    else:
+        # Not in queue yet ⇒ enqueue a parse job and mark pending
+        LLM_PARSE_RESULTS[filepath] = {'status': 'pending', 'result': None}
+        # priority 0, parse_type "all" to match what /api/current uses
+        LLM_PARSE_QUEUE.put((0, filepath, 'all'))
+
+        # --- Look-ahead pre-fetch: queue the next 3 photos ---------------------
+        try:
+            # Build the current filtered list and locate this photo’s index
+            filtered_list = STATE.database.get_filtered_photos(STATE.current_filter)
+            idx = filtered_list.index(filepath)
+
+            # Queue photos idx+1 .. idx+3 (if any) at lower priority (1)
+            for fp_n in filtered_list[idx + 1 : idx + 4]:
+                if fp_n not in LLM_PARSE_RESULTS:
+                    LLM_PARSE_RESULTS[fp_n] = {'status': 'pending', 'result': None}
+                    LLM_PARSE_QUEUE.put((1, fp_n, 'all'))     # lower priority
+
+            # --- rolling window: keep exactly three photos ahead in the queue ---
+            tail_idx = idx + 4
+            if tail_idx < len(filtered_list):
+                tail_fp = filtered_list[tail_idx]
+                if tail_fp not in LLM_PARSE_RESULTS:
+                    LLM_PARSE_RESULTS[tail_fp] = {'status': 'pending', 'result': None}
+                    LLM_PARSE_QUEUE.put((1, tail_fp, 'all'))  # lower priority
+            # ---------------------------------------------------------------------
+        except ValueError:
+            # filepath not found in list (edge-case) – just ignore
+            pass
+        # -----------------------------------------------------------------------
+        return jsonify({'status': 'pending'})
 
 # ============================================================================
 # METADATA SAVE/UPDATE ROUTES
@@ -4166,24 +5079,44 @@ def get_grid_photos(filter_type):
         
         # Get photos for this page
         grid_data = []
-        with STATE.database.get_db() as conn:
-            for index in range(start, end):
-                filepath = filtered_photos[index]
-                photo_path = Path(filepath)
-                
-                # Check import status
+        
+        # Prepare photo data for parallel processing
+        photo_batch = []
+        for index in range(start, end):
+            filepath = filtered_photos[index]
+            photo_path = Path(filepath)
+            photo_batch.append((index, filepath, photo_path))
+        
+        # Process photos in parallel using thread pool
+        from concurrent.futures import ThreadPoolExecutor
+        def process_photo(photo_info):
+            index, filepath, photo_path = photo_info
+            # Each thread gets its own connection
+            with STATE.database.get_db() as conn:
                 row = conn.execute(
                     'SELECT imported_at FROM photos WHERE filepath = ?',
                     (filepath,)
                 ).fetchone()
-                
-                grid_data.append({
-                    'index': index,
-                    'filename': photo_path.name,
-                    'filepath': filepath,
-                    'thumbnail': create_thumbnail(photo_path, max_size=(120, 120)),
-                    'imported_at': row['imported_at'] if row else None
-                })
+            
+            resp = {
+                'index': index,
+                'filename': photo_path.name,
+                'filepath': filepath,
+                'thumbnail': create_thumbnail(photo_path, max_size=(120, 120)),
+                'imported_at': row['imported_at'] if row else None
+            }
+
+            STATE.database._pool.release_connection()
+            return resp
+        
+        # Re-use the shared pipeline executor to avoid nested pools
+        from concurrent.futures import as_completed
+        photo_futures = [STATE.pipeline_executor.submit(process_photo, p)
+                         for p in photo_batch]
+        grid_data = [f.result() for f in as_completed(photo_futures)]
+        
+        # Sort by index to maintain order
+        grid_data.sort(key=lambda x: x['index'])
         
         return jsonify({
             'photos': grid_data,
@@ -4838,6 +5771,23 @@ def initialize_session(folder_path: str):
     
     print(f"\n✓ Generated {completed - failed} thumbnails successfully ({failed} failed)")
     
+    # Initialize LLM parser (model only, no pre-parsing)
+    if USE_LLM_PARSER and _LLM_AVAILABLE:
+        try:
+            print("\nInitializing LLM filename parser...")
+            STATE.filename_parser = FilenameParser(cache_dir=DATA_DIR / ".llm_cache")
+            STATE.filename_parser.load_model()
+            print("✓ LLM parser ready (parse-on-demand mode)")
+            
+            # Start the LLM worker thread
+            start_llm_worker()
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM parser: {e}")
+            STATE.filename_parser = None
+            print(f"⚠ LLM parser initialization failed: {e}")
+            print("  Falling back to regex parser")
+    
     # Initialize gazetteer
     gazetteer_path = DATA_DIR / "uscities.csv"
     if not gazetteer_path.exists():
@@ -4922,12 +5872,29 @@ def main():
     print(f"Working directory: {folder_path}")
     print(f"Starting server at http://localhost:{WEB_PORT}")
     print("Press Ctrl+C to stop\n")
-
+    
     # Run Flask in a background thread so the main thread can keep the Cocoa run-loop alive
     def _run_flask():
-        app.run(debug=False, port=WEB_PORT, host='127.0.0.1', use_reloader=False)
+        """Launch Waitress and make sure fatal errors are *not* hidden in the thread.
 
-    flask_thread = threading.Thread(target=_run_flask, daemon=True)
+        If Waitress raises (e.g. port already bound), log it and terminate the
+        whole process so the user immediately sees the problem instead of an
+        unresponsive UI.
+        """
+        from waitress import serve
+        try:
+            serve(app, host='127.0.0.1', port=WEB_PORT, threads=8)
+        except Exception as e:
+            logger.error(f"Waitress failed to start: {e}")
+            os._exit(1)           # Propagate the failure to the parent process
+
+    # Daemon thread allows single Ctrl-C shutdown; _run_flask will call
+    # os._exit(1) if Waitress fails to bind, so fatal errors are still surfaced.
+    flask_thread = threading.Thread(
+        target=_run_flask,
+        name="WaitressThread",
+        daemon=True
+    )
     flask_thread.start()
 
     # Wait until the Flask port is accepting connections, then launch
@@ -4945,6 +5912,14 @@ def main():
         AppHelper.runConsoleEventLoop()
     except KeyboardInterrupt:
         print("\nShutting down…")
+        # Gracefully stop background workers
+        stop_llm_worker()           # uses helper we already have:contentReference[oaicite:2]{index=2}
+        STATE.shutdown_db_worker()  # cleans up DB thread & queue:contentReference[oaicite:3]{index=3}
+
+        # Wait briefly for the HTTP server thread to finish
+        if flask_thread.is_alive():
+            flask_thread.join(timeout=2.0)
+
         sys.exit(0)
 
 # ============================================================================

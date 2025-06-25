@@ -257,6 +257,38 @@ Licensed under GPL v3 - see LICENSE file for details.
         .suggestion-btn:hover {
             opacity: 0.8;
         }
+
+        /* Dual location suggestion buttons */
+        .location-dual-container {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            margin-top: 8px;
+            margin-bottom: 16px;
+        }
+        
+        .location-dual-container .btn {
+            padding: 4px 12px;
+            font-size: 12px;
+            background: var(--source-filename);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: opacity 0.3s ease;
+            text-align: left;
+            font-weight: normal;
+            display: inline-block;
+        }
+        
+        .location-dual-container .btn:hover {
+            opacity: 0.8;
+        }
+        
+        .location-dual-container .btn.alternate {
+            background: var(--source-filename);
+        }
         
         /* Input Fields */
         .input-group {
@@ -933,9 +965,10 @@ Licensed under GPL v3 - see LICENSE file for details.
             <div style="margin-bottom: 32px;">
                 <div class="section-title">
                     Date
-                    <button id="date-suggestion-btn" class="suggestion-btn" style="display: none;" 
-                            onclick="acceptDateSuggestion()">Use suggestion</button>
                 </div>
+                
+                <button id="date-suggestion-btn" class="suggestion-btn" style="display: none; margin-top: 8px; margin-bottom: 16px;" 
+                        onclick="acceptDateSuggestion()">Use suggestion</button>
                 
                 <div class="date-inputs">
                     <div class="input-group">
@@ -966,8 +999,8 @@ Licensed under GPL v3 - see LICENSE file for details.
             <div style="margin-bottom: 32px;">
                 <div class="section-title">
                     Location
-                    <button id="location-suggestion-btn" class="suggestion-btn" style="display: none;"
-                            onclick="acceptLocationSuggestion()">Use suggestion</button>
+                    <button id="location-suggestion-btn" class="suggestion-btn" style="display: none;" 
+                            onclick="window.acceptLocationSuggestion ? window.acceptLocationSuggestion() : acceptLocationSuggestion()">Use suggestion</button>
                 </div>
                 
                 <!-- NEW UNIFIED LOCATION SEARCH -->
@@ -1024,6 +1057,10 @@ Licensed under GPL v3 - see LICENSE file for details.
         let currentGridFilter = null;
         // Selection tracking for import feature
         let selectedPhotos = new Set();
+        
+        // LLM polling state
+        let llmPollTimeout = null;
+        let llmPollCount = 0;
         
         // Re-send state tracking
         let resendTimeout = null;
@@ -1581,7 +1618,112 @@ Licensed under GPL v3 - see LICENSE file for details.
                 console.error('Error loading photo:', error);
             }
         }
+
+        // Poll for LLM suggestions
+        function startLLMPolling(filepath) {
+            // Tear down any previous poll
+            if (llmPollTimeout) {
+                clearTimeout(llmPollTimeout);
+                llmPollTimeout = null;
+            }
+
+            function poll() {
+                // Only poll if still on the same photo
+                if (!currentPhoto || currentPhoto.filepath !== filepath) {
+                    return;
+                }
+
+                fetch(`/api/suggestions/${encodeURIComponent(filepath)}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'ready') {
+                            // Got the final result → stop polling & update UI
+                            clearTimeout(llmPollTimeout);
+                            llmPollTimeout = null;
+                            dateSuggestion     = data.date_suggestion;
+                            locationSuggestion = data.location_suggestion;
+                            updateLLMSuggestions(data.date_suggestion, data.location_suggestion);
+                        } else {
+                            // Still pending → poll again in 500ms
+                            llmPollTimeout = setTimeout(poll, 500);
+                        }
+                    })
+                    .catch(err => {
+                        clearTimeout(llmPollTimeout);
+                        llmPollTimeout = null;
+                    });
+            }
+
+            // Kick off the first check after a short delay
+            llmPollTimeout = setTimeout(poll, 300);
+        }
+
         
+        // Update UI with LLM suggestions
+        function updateLLMSuggestions(dateSug, locationSug) {
+            // Only proceed if we actually have suggestions
+            if (!dateSug && !locationSug)  {
+                // Parsing finished but nothing to suggest → just clear “Analyzing”
+                document.getElementById('date-suggestion-btn').style.display = 'none';
+                const dual = document.getElementById('location-dual-container'); if (dual) dual.remove();
+                return;
+            }
+            // --- DATE SUGGESTION ---
+            const dateBtn = document.getElementById('date-suggestion-btn');
+            if (dateSug) {
+                dateSuggestion = dateSug;
+                let sugText = 'Suggested: ';
+                if (dateSug.month && dateSug.year) {
+                    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                    const idx = parseInt(dateSug.month, 10) - 1;
+                    sugText += dateSug.day
+                        ? `${monthNames[idx]||dateSug.month} ${dateSug.day}, ${dateSug.year}`
+                        : `${monthNames[idx]||dateSug.month} ${dateSug.year}`;
+                } else if (dateSug.year) {
+                    sugText += dateSug.year;
+                }
+                dateBtn.textContent   = sugText;
+                dateBtn.disabled      = false;
+                dateBtn.style.display = 'block';
+                fieldSources.wasCompleteSuggestion = !!dateSug.is_complete;
+            }
+
+            // --- LOCATION SUGGESTION ---
+            const locBtn = document.getElementById('location-suggestion-btn');
+            const oldDual = document.getElementById('location-dual-container');
+            if (oldDual) oldDual.remove();
+
+            if (locationSug && locationSug.primary_search) {
+                locBtn.style.display = 'none';
+                const container = document.createElement('div');
+                container.id = 'location-dual-container';
+                container.className = 'location-dual-container';
+
+                const makeBtn = (text, alt) => {
+                    const b = document.createElement('button');
+                    b.className = 'btn' + (alt ? ' alternate' : '');
+                    b.textContent = text;
+                    b.onclick     = () => acceptLocationSuggestion(alt);
+                    return b;
+                };
+
+                container.append(
+                    makeBtn(`Specific: ${locationSug.primary_search}`, false),
+                    locationSug.alternate_search
+                        ? makeBtn(`General:  ${locationSug.alternate_search}`, true)
+                        : document.createTextNode('')
+                );
+
+                const sectionTitle = locBtn.parentNode;
+             sectionTitle.parentNode.insertBefore(
+                 container,
+                 sectionTitle.nextSibling
+             );
+            } else {
+                locBtn.style.display = locationSug ? 'block' : 'none';
+            }
+        }
+
         // Update entire UI
         function updateUI(data) {
             // Reset unknown button states
@@ -1664,10 +1806,22 @@ Licensed under GPL v3 - see LICENSE file for details.
             dateSuggestion = data.date_suggestion;
             locationSuggestion = data.location_suggestion;
             
+            // Check if LLM parsing is pending
+            if (data.llm_status === 'pending') {
+                // Start polling for results
+                startLLMPolling(data.filepath);
+                
+                }
+            
             // Update suggestion button text with preview
             const dateSugBtn = document.getElementById('date-suggestion-btn');
-            if (dateSuggestion) {
-                let sugText = 'Use suggestion: ';
+            if (data.llm_status === 'pending' && !dateSuggestion) {
+                // Show analyzing state
+                dateSugBtn.textContent = 'Analyzing...';
+                dateSugBtn.style.display = 'block';
+                dateSugBtn.disabled = true;
+            } else if (dateSuggestion) {
+                let sugText = 'Suggested: ';
                 if (dateSuggestion.month && dateSuggestion.year) {
                     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
                                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1682,29 +1836,80 @@ Licensed under GPL v3 - see LICENSE file for details.
                 }
                 dateSugBtn.textContent = sugText;
                 dateSugBtn.style.display = 'block';
+                dateSugBtn.disabled = false;
             } else {
                 dateSugBtn.style.display = 'none';
             }
             
             const locSugBtn = document.getElementById('location-suggestion-btn');
-            if (locationSuggestion) {
-                let sugText = 'Use suggestion: ';
-                let sugParts = [];
+            const existingDualContainer = document.getElementById('location-dual-container');
+            
+            // Clean up any existing dual container
+            if (existingDualContainer) {
+                existingDualContainer.remove();
+            }
+            
+            if (data.llm_status === 'pending' && !locationSuggestion) {
+                // Show analyzing state using simple button below title
+                locSugBtn.style.display = 'none';
                 
-                if (locationSuggestion.city) sugParts.push(locationSuggestion.city);
-                if (locationSuggestion.state) sugParts.push(locationSuggestion.state);
-                if (locationSuggestion.country && locationSuggestion.country !== '' && 
-                    locationSuggestion.country !== 'United States') {
-                    sugParts.push(locationSuggestion.country);
+                // Create analyzing button container
+                const dualContainer = document.createElement('div');
+                dualContainer.id = 'location-dual-container';
+                dualContainer.className = 'location-dual-container';
+                
+                const analyzingBtn = document.createElement('button');
+                analyzingBtn.className = 'btn';
+                analyzingBtn.textContent = 'Analyzing...';
+                analyzingBtn.disabled = true;
+                
+                dualContainer.appendChild(analyzingBtn);
+                
+                const sectionTitle = locSugBtn.parentNode;
+                sectionTitle.parentNode.insertBefore(dualContainer, sectionTitle.nextSibling);
+                
+            } else if (locationSuggestion && locationSuggestion.primary_search) {
+                // Hide single button
+                locSugBtn.style.display = 'none';
+                
+                // Create dual button container
+                const dualContainer = document.createElement('div');
+                dualContainer.id = 'location-dual-container';
+                dualContainer.className = 'location-dual-container';
+                
+                // Create primary button
+                const primaryBtn = document.createElement('button');
+                primaryBtn.className = 'btn';
+                primaryBtn.textContent = `Specific: ${locationSuggestion.primary_search}`;
+                primaryBtn.onclick = function() { 
+                    if (window.acceptLocationSuggestion) {
+                        window.acceptLocationSuggestion(false);
+                    }
+                };
+                
+                dualContainer.appendChild(primaryBtn);
+                
+                // Create alternate button if available
+                if (locationSuggestion.alternate_search) {
+                    const alternateBtn = document.createElement('button');
+                    alternateBtn.className = 'btn alternate';
+                    alternateBtn.textContent = `General: ${locationSuggestion.alternate_search}`;
+                    alternateBtn.onclick = function() { 
+                        if (window.acceptLocationSuggestion) {
+                            window.acceptLocationSuggestion(true);
+                        }
+                    };
+                    
+                    dualContainer.appendChild(alternateBtn);
                 }
                 
-                if (sugParts.length > 0) {
-                    sugText += sugParts.join(', ');
-                    locSugBtn.textContent = sugText;
-                    locSugBtn.style.display = 'block';
-                } else {
-                    locSugBtn.style.display = 'none';
-                }
+                // Insert after the section title
+                const sectionTitle = locSugBtn.parentNode;
+                sectionTitle.parentNode.insertBefore(dualContainer, sectionTitle.nextSibling);
+                
+            } else if (locationSuggestion) {
+                // Fallback to old format - always hide single button
+                locSugBtn.style.display = 'none';
             } else {
                 locSugBtn.style.display = 'none';
             }
@@ -1964,20 +2169,27 @@ Licensed under GPL v3 - see LICENSE file for details.
             updateFieldBadge('day', fieldSources.day);
         }
         
-        // Accept location suggestion
-        async function acceptLocationSuggestion() {
+        // Accept location suggestion - now handles primary/alternate
+        async function acceptLocationSuggestion(useAlternate = false) {
             if (!locationSuggestion) return;
 
-            // Compose the query string including country for international locations
-            let queryParts = [];
-            if (locationSuggestion.city) queryParts.push(locationSuggestion.city);
-            if (locationSuggestion.state) queryParts.push(locationSuggestion.state);
-            if (locationSuggestion.country && locationSuggestion.country !== '' && 
-                locationSuggestion.country !== 'United States') {
-                queryParts.push(locationSuggestion.country);
+            // Determine which search to use
+            let query;
+            if (useAlternate && locationSuggestion.alternate_search) {
+                query = locationSuggestion.alternate_search;
+            } else if (locationSuggestion.primary_search) {
+                query = locationSuggestion.primary_search;
+            } else {
+                // Fallback to old format if needed
+                let queryParts = [];
+                if (locationSuggestion.city) queryParts.push(locationSuggestion.city);
+                if (locationSuggestion.state) queryParts.push(locationSuggestion.state);
+                if (locationSuggestion.country && locationSuggestion.country !== '' && 
+                    locationSuggestion.country !== 'United States') {
+                    queryParts.push(locationSuggestion.country);
+                }
+                query = queryParts.join(', ');
             }
-            
-            const query = queryParts.join(', ');
             
             if (!query) return;
 
@@ -1985,6 +2197,18 @@ Licensed under GPL v3 - see LICENSE file for details.
             const input = document.getElementById('location-search');
             input.value = query;
             document.getElementById('location-clear').style.display = 'flex';
+            
+            // Add visual feedback for confidence (with safety check)
+            if (locationSuggestion.confidence !== undefined) {
+                const confidenceColor = locationSuggestion.confidence > 80 ? '#34C759' : 
+                                       locationSuggestion.confidence > 50 ? '#FF9500' : '#FF453A';
+                input.style.borderColor = confidenceColor;
+                
+                // Reset border color after a moment
+                setTimeout(() => {
+                    input.style.borderColor = '';
+                }, 3000);
+            }
 
             // Launch search
             await searchLocations(query);
@@ -2082,9 +2306,21 @@ Licensed under GPL v3 - see LICENSE file for details.
                 searchInput.classList.add('unknown-value');
                 searchInput.disabled = true;
                 unknownLocationActive = true;
-                
+
                 clearLocationSearch();
                 searchInput.value = 'Unknown';  // Set value AFTER clearing
+
+                // Notify Flask so the change is recorded //
+                try {
+                    const resp  = await fetch('/api/unknown_location', { method: 'POST' });
+                    const data  = await resp.json();
+                    if (data.success) {
+                        // keep source badges in sync
+                        updateFieldBadge('location', data.source);
+                    }
+                } catch (err) {
+                    console.error('Error setting unknown location:', err);
+                }
             }
         }
         
@@ -2182,6 +2418,12 @@ Licensed under GPL v3 - see LICENSE file for details.
             // Clear any pending re-send state
             clearResendState();
             
+            // Clear LLM polling
+            if (llmPollTimeout) {
+                clearTimeout(llmPollTimeout);
+                llmPollTimeout = null;
+            }
+            
             try {
                 // Check bounds locally first
                 if (!currentPhoto) return;
@@ -2210,6 +2452,12 @@ Licensed under GPL v3 - see LICENSE file for details.
         async function setFilter(filter, element) {
             // Clear any pending re-send state
             clearResendState();
+            
+            // Clear LLM polling
+            if (llmPollTimeout) {
+                clearTimeout(llmPollTimeout);
+                llmPollTimeout = null;
+            }
             
             // Check if clicking the same active filter
             const isCurrentFilter = currentPhoto && currentPhoto.current_filter === filter;
@@ -2535,6 +2783,9 @@ Licensed under GPL v3 - see LICENSE file for details.
         document.addEventListener('DOMContentLoaded', () => {
             initializeLocationSearch();
             loadCurrentPhoto();
+            
+            // Make function globally accessible for onclick handlers
+            window.acceptLocationSuggestion = acceptLocationSuggestion;
         });
     </script>
 </body>

@@ -21,6 +21,7 @@ The editor has three main panels:
 - Quick action buttons (Unknown Date/Location)
 - Date entry fields
 - Location search with Apple Maps
+- Dual location suggestions when available
 - Save button and import controls
 
 ## Basic Workflow
@@ -48,10 +49,19 @@ The tool detects dates and locations in filenames:
 | Filename Pattern | Detected Date | Detected Location |
 |-----------------|---------------|-------------------|
 | `Birthday_Chicago_IL_July_4_1995_0871.heic` | July 4, 1995 | Chicago, IL |
-| `Vacation_FL_1995_041.heic` | 1995 only | FL |
+| `Vacation_FL_1995_041.heic` | 1995 | FL |
 | `Trip_1995_07_04_1001.heic` | July 4, 1995 | None |
 
 When detected, blue suggestion buttons appear for both date and location.
+
+When you navigate to a photo:
+1. You'll might see **"Analyzing..."** buttons while the LLM processes the filename
+2. After a moment, the suggestion information will appear
+3. The LLM pre-processes upcoming photos so they're ready instantly
+
+**Location will offer two options:**
+- **Specific**: More detailed location (e.g., "Hardrock Stadium, Miami Gardens, FL")  
+- **General**: Broader location (e.g., "Miami, FL")
 
 #### Manual Entry
 
@@ -225,6 +235,33 @@ The tool uses keywords to track photo status:
 - **MissingLocation**: Photo needs location information
 
 These are removed when you provide the missing information.
+
+### LLM Parsing Issues
+
+**"Analyzing..." stays too long (>10 seconds)**
+- Navigate to another photo and back
+- The LLM model might be loading (first and photos only)
+- Check if you have enough RAM (Activity Monitor)
+
+**No suggestions appear**
+- Filename might not contain recognizable patterns
+- Rename file, check if LLM is downloaded and active
+
+**Wrong suggestions**
+- The LLM makes educated guesses from limited context
+- Simply ignore suggestions and enter manually
+- (Advanced) Attempt to update internal prompt
+
+### Performance
+
+**First and Second photo are slow**
+- Normal - LLM model takes ~6 seconds to warm up and cache the next 3 images
+- Subsequent photos will be much faster
+- Model only loads once per session
+
+**High memory usage**
+- The LLM model uses ~4GB RAM
+- Can disable LLM in settings (see Reference guide)
 
 ## Next Steps
 

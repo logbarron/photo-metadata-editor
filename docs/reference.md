@@ -12,20 +12,22 @@ Architecture, configuration, troubleshooting, and performance optimization.
 │  (JavaScript)   │◀────│  (Python)    │◀────│  Database   │
 └─────────────────┘     └──────────────┘     └─────────────┘
                                │
-                               ▼
-                        ┌──────────────┐
-                        │   ExifTool   │
-                        │ (Metadata)   │
-                        └──────────────┘
+                               ├──────────────┐
+                               ▼              ▼
+                        ┌──────────────┐ ┌──────────────┐
+                        │   ExifTool   │ │  Mistral-7B  │
+                        │ (Metadata)   │ │   (Parser)   │
+                        └──────────────┘ └──────────────┘
 ```
 
 ### Data Flow
 
 1. **Photo Scanning**: Parallel workers index photos into SQLite
-2. **Thumbnail Generation**: 10 workers create cached thumbnails
-3. **User Edits**: Web interface updates via REST API
-4. **File Writing**: ExifTool modifies HEIC files directly
-5. **Cache Management**: LRU eviction at 1000 entries
+2. **Filename Parsing**: Mistral-7B analyzes filenames for dates/locations
+3. **Thumbnail Generation**: 10 workers create cached thumbnails
+4. **User Edits**: Web interface updates via REST API
+5. **File Writing**: ExifTool modifies HEIC files directly
+6. **Cache Management**: LRU eviction at 1000 entries (except LLM results)
 
 ## Performance Optimization
 
@@ -88,6 +90,7 @@ THUMBNAIL_CACHE_SIZE=1000      # Memory cache entries
 WEB_PORT=5555                  # Web interface port
 DATE_KEYWORD=MissingDate       # Tag for photos needing date
 LOCATION_KEYWORD=MissingLocation # Tag for photos needing location
+LLM_PARSER_ENABLED=true        # LLM filename parsing (default: true)
 ```
 
 #### Unknown Values
@@ -139,6 +142,24 @@ Created on first pipeline use:
   }
 }
 ```
+### LLM Performance
+
+The Mistral-7B model processes filenames with these characteristics:
+
+| Metric | Value | Description |
+|--------|-------|-------------|
+| First photo | ~6 seconds | Model loading + inference |
+| Second photo | ~8 seconds |  Inference + next photo inference |
+| Subsequent photos | <1 second | Pre-fetched or cached |
+| Model size | 4GB | One-time download |
+| RAM usage | ~4GB | When model is active |
+| Worker threads | 2 | Delayed spawning to prevent contention |
+| Cache | Permanent | Results stored in database |
+
+Pre-fetching strategy:
+- Current photo: Immediate (high priority)
+- Next 3 photos: Background (low priority)
+- Already processed: Instant (from cache or db)
 
 ## Troubleshooting
 
@@ -230,12 +251,43 @@ ssh -vvv -i ~/.ssh/pipeline_key user@mac-b.local
 2. Using SSD storage for photos
 3. Closing other applications
 
+#### LLM Parsing Issues
+
+##### Model Download Failed
+**Symptoms**: Stuck at "Downloading model..." or error message
+**Solutions**:
+1. Check internet connection (4GB download required)
+2. Check disk space in home directory (~4GB needed)
+3. Delete .llm_cache folder in /data
+4. Disable if needed: Set `LLM_PARSER_ENABLED=false` in `.env`
+
+##### "Analyzing..." Never Completes
+**Symptoms**: Suggestion buttons stuck on "Analyzing..."
+**Causes**:
+1. Model failed to load (check console for errors)
+2. Not enough RAM (need ~4GB free)
+3. Background worker crashed
+**Solutions**:
+1. Restart the application
+2. Check Activity Monitor for memory usage
+3. Disable other applications to free RAM
+
+##### Suggestions Not Appearing
+**Symptoms**: No blue suggestion buttons even with clear dates in filename
+**Note**: The LM & Regex needs recognizable patterns. Examples that work:
+- "Birthday_Chicago_July_4_1995.heic" ✓
+- "Grandma 80th birthday Chicago 1995.heic" ✓  
+- "IMG_1234.heic" ✗ (no context to parse)
+- "Scan0001.heic" ✗ (just numbers)
+
 ## File Structure Details
 
 ### Database Schema
 
 `photo_metadata.db` key tables:
 - **photos**: Main photo metadata and state
+  - Includes LLM suggestion cache columns
+  - Stores parsing confidence and reasoning
 - **locations**: Saved locations with usage count
 - **thumbnails**: Cached thumbnail data
 - **pipeline_queue**: Transfer queue (if using pipeline)
@@ -300,3 +352,21 @@ ExifTool tags modified:
 - Typical transfer: 1-2 MB/s per photo
 - Batch transfers reduce overhead
 - Consider `batch_size_limit` for very large collections
+
+### LLM Configuration
+
+While the default settings work well, advanced users can tune behavior:
+
+1. **Disable LLM**: Set `LLM_PARSER_ENABLED=false` in `.env`
+2. **Clear parsing cache**: 
+   ```sql
+   UPDATE photos SET suggestion_parsed_at = NULL;
+3. **Force re-parse**: Delete suggestion cache or database and restart
+4. **Change Prompt**: Adjust in main .py. Prompt is very temperamental, proceed with caution. 
+
+The model runs with these settings:
+
+4-bit quantization for efficiency
+GPU acceleration when available
+2048 token context window
+Temperature 0.1 for consistent results

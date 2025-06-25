@@ -4,7 +4,7 @@ Context about how this tool was built and key design decisions.
 
 ## AI-Assisted Development
 
-This project was developed through iterative collaboration with multiple AI language models (LLMs). The development process involved:
+This project was developed through iterative collaboration with multiple AI large language models (LLMs). The development process involved:
 
 - Initial prototyping based on workflow requirements
 - Rapid iteration with AI-generated code
@@ -43,6 +43,13 @@ The tool was built for a specific workflow:
 - Matches how cameras write metadata
 
 The tradeoff is permanent modification without undo capability.
+
+### Why AI-Powered Filename Parsing?
+
+- Filenames rarely follow consistent patterns
+- Local LLM provides intelligent extraction without cloud dependencies
+- Database caching means each filename is only parsed once
+- Falls back to simple patterns if needed
 
 ### Why Web Interface?
 
@@ -98,6 +105,13 @@ The application uses multiple thread pools:
 
 ### Key Implementation Details
 
+#### Filename Parser
+- Local Mistral-7B model extracts dates and locations from filenames
+- Understands varied patterns like "Grandma's 80th birthday Chicago 1995"
+- Background processing with "Analyzing..." indicator
+- Results cached in database for instant future access
+- Pre-fetches upcoming photos for seamless navigation
+
 #### Cache Architecture
 - Two-level caching: memory + database
 - LRU eviction (removes oldest 20 at limit)
@@ -109,6 +123,13 @@ The application uses multiple thread pools:
 - Database queue for write serialization
 - Pipeline state tracking for transfers
 - UI state in JavaScript (not persisted)
+
+### Server Architecture
+
+- Waitress WSGI server for production stability
+- Thread pool with 8 workers for concurrent requests
+- Graceful error handling prevents silent failures
+- Port binding errors immediately visible to user
 
 #### Error Handling
 - Graceful degradation for missing features
@@ -139,6 +160,11 @@ The application uses multiple thread pools:
    - Simplifies workflow
    - Reduces complexity
    - Could recurse with changes
+
+5. **LLM Model**: 4GB download on first use
+   - One-time download
+   - 4-bit quantized for efficiency
+   - Requires ~4GB RAM when running
 
 ### Performance Trade-offs
 
