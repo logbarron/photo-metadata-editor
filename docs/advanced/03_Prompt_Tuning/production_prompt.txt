@@ -1,0 +1,81 @@
+Analyze this photo filename to determine WHERE the photo was taken.
+
+For each filename, think step by step:
+1. What is likely the SUBJECT of the photo? (what's in it)
+2. Is there a LOCATION NAME explicitly written in the filename?
+3. Are there any clues about the type of location? (restaurant, park, home, tourist spot, etc.)
+4. Is this a place you could find on a public map, or is it someone's personal property?
+
+Output JSON with these fields:
+{
+  "location_confidence": "high/medium/low/none",
+  "primary_search": "<best search query for Apple Maps>",
+  "alternate_search": "<backup search if primary is wrong>",
+  "location_type": "venue/landmark/city/address/unknown",
+  "location_context": "<explanation of your reasoning>",
+  
+  "extracted": {
+    "subject": "<what the photo is OF>",
+    "where_taken": "<where you think it was taken>",
+    "landmark_name": "<specific place name if mentioned>",
+    "city": "<city if found - keep abbreviations like NYC, SF, LA as-is>",
+    "state": "<2-letter code if US/Canada>",
+    "country": "<country if not US>",
+    "date_parts": {"year": null, "month": null, "day": null}
+  },
+  
+  "search_strategy": "venue_first/city_first/landmark_only/need_more_info"
+}
+
+Rules:
+- Set location_confidence="none" if location is: home, house, grandma's, grandpa's, or any personal/family place
+- For search queries, remove activity/event words: "Beach Vacation Cancun" → "Cancun"
+- Keep common city abbreviations unchanged: NYC stays NYC, SF stays SF, LA stays LA
+- Month names: Jan→"01", Feb→"02", Mar→"03", Apr→"04", May→"05", Jun→"06", Jul→"07", Aug→"08", Sep→"09", Oct→"10", Nov→"11", Dec→"12"
+- Extract ISO dates like 2023-05-15 as year:"2023", month:"05", day:"15"
+- Extract partial dates like 2023-05 as year:"2023", month:"05", day:null
+- For dates like "July 4th 2023", extract as year:"2023", month:"07", day:"04"
+- Trailing 3-4 digits are sequence numbers unless part of a year
+- Filename can have any extension (.heic, .jpg, .png, etc.)
+- CRITICAL: Always add a comma after "date_parts": {...} since more fields follow it
+
+Examples:
+Filename: Medieval_Times_Orlando_FL_Nov_14_1996.heic
+{
+  "location_confidence": "high",
+  "primary_search": "Medieval Times, Orlando FL",
+  "alternate_search": "Orlando, FL",
+  "location_type": "venue",
+  "location_context": "Medieval Times is a restaurant chain, this photo was likely taken at the Orlando location",
+  "extracted": {
+    "subject": "visit to Medieval Times",
+    "where_taken": "Medieval Times restaurant in Orlando",
+    "landmark_name": "Medieval Times",
+    "city": "Orlando",
+    "state": "FL",
+    "country": null,
+    "date_parts": {"year": "1996", "month": "11", "day": "14"}
+  },
+  "search_strategy": "venue_first"
+}
+
+Filename: Family_Reunion_Grandmas_House_July_4th_2023.jpg
+{
+  "location_confidence": "none",
+  "primary_search": null,
+  "alternate_search": null,
+  "location_type": "unknown",
+  "location_context": "This is a family gathering at someone's personal residence, not a searchable public location",
+  "extracted": {
+    "subject": "family reunion",
+    "where_taken": "grandma's house",
+    "landmark_name": null,
+    "city": null,
+    "state": null,
+    "country": null,
+    "date_parts": {"year": "2023", "month": "07", "day": "04"}
+  },
+  "search_strategy": "need_more_info"
+}
+
+Filename: {filename}

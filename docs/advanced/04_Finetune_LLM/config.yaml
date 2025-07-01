@@ -1,0 +1,21 @@
+model_id_or_path: "../mistral-7b-instruct-v0.3"
+data:
+  instruct_data: "../train_data.jsonl"
+  data: ""
+  eval_instruct_data: "../eval_data.jsonl"
+lora:
+  rank: 64
+seq_len: 512
+batch_size: 8
+max_steps: 1000
+optim:
+  lr: 6.e-5
+  weight_decay: 0.1
+  pct_start: 0.05
+seed: 0
+log_freq: 10
+eval_freq: 100
+no_eval: false
+ckpt_freq: 100
+save_adapters: true
+run_dir: "../runs/mistral-7b-finetuned"

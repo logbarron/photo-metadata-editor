@@ -61,13 +61,17 @@ The web interface opens at http://localhost:5555
 
 ## Documentation
 
-- [Setup Guide](docs/setup.md) - Installation and configuration
-- [User Guide](docs/user-guide.md) - Complete usage instructions
-- [Technical Reference](docs/reference.md) - Architecture, troubleshooting, performance
-- [Pipeline Setup](docs/pipeline.md) - Mac-to-Mac transfer system
-- [Development Notes](docs/development.md) - Design decisions and background
-- [Quick Reference](docs/quick-reference.md) - Keyboard shortcuts, design patterns, icons
-- [Mac B Undo Guide](docs/mac-b-undo-guide.md) - Removal of tools and code on Mac B
+### Main Documentation
+- [Setup Guide](docs/main/setup.md) - Installation and configuration
+- [User Guide](docs/main/user-guide.md) - Complete usage instructions
+- [Technical Reference](docs/main/reference.md) - Architecture, troubleshooting, performance
+- [Pipeline Setup](docs/main/pipeline.md) - Mac-to-Mac transfer system
+- [Development Notes](docs/main/development.md) - Design decisions and background
+- [Quick Reference](docs/main/quick-reference.md) - Keyboard shortcuts, design patterns, icons
+- [Mac B Undo Guide](docs/main/mac-b-undo-guide.md) - Removal of tools and code on Mac B
+
+### Advanced Topics
+- [Tool Development](docs/advanced/advanced-readme.md) - Tools for modifying the program
 
 ## Two-Part System
 
@@ -76,9 +80,9 @@ The web interface opens at http://localhost:5555
 
 ## Important Notes
 
-⚠️ **This tool permanently modifies your photo files**. Original metadata is overwritten and cannot be recovered. Always maintain backups.
+**This tool permanently modifies your photo files**. Original metadata is overwritten and cannot be recovered. Always maintain backups.
 
-⚠️ **AI-Assisted Development**: This project was developed with AI language models. While extensively tested, please review the implementation for your specific use case.
+**AI-Assisted Development**: This project was developed with AI language models. While extensively tested, please review the implementation for your specific use case.
 
 ## License
 

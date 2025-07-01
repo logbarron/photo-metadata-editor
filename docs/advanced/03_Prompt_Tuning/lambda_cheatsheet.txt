@@ -1,0 +1,27 @@
+
+### Mini-cheat-sheet
+
+| Task                                | Command pattern                                     |
+| ----------------------------------- | --------------------------------------------------- |
+| Log in                              | ssh ubuntu@<IP>                                     |
+| Copy **to** server                  | scp <local_path>  ubuntu@<IP>:<remote_path>         |
+| Copy **from** server                | scp ubuntu@<IP>:<remote_path>  <local_path>         |
+
+
+Terminal A (RUN PROGRAM)
+1. ssh ubuntu@IP
+2. authenticate ssh
+3. curl -LsSf https://astral.sh/uv/install.sh | sh
+4. chmod +x lambda_harness.py
+5. ./lambda_harness.py filename_dataset.json --baseline-prompt production_prompt.txt
+6. scp ubuntu@IP:~/file.py .
+
+Terminal B (UPLOAD)
+1. cd /folder
+2. scp lambda_harness.py filename_dataset.json production_prompt.txt ubuntu@IP:~/
+
+TERMINAL B (DOWNLOAD)
+3. scp ubuntu@IP:file ./
+
+
+
