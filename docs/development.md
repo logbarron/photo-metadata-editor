@@ -8,11 +8,12 @@ This project was developed through iterative collaboration with multiple AI larg
 
 - Initial prototyping based on workflow requirements
 - Rapid iteration with AI-generated code
-- Extensive real-world testing with photo collections
+- Extensive testing with photo collections
 - Refinement based on actual usage patterns
 
-While the code has been extensively tested with real photo collections, users should review the implementation for their specific needs, particularly around:
+While the code has been extensively tested with photo collections, users should review the implementation for their specific needs, particularly around:
 - Error handling for edge cases
+- LLM suggestions
 - File system permissions
 - Network security (for pipeline features)
 
@@ -63,7 +64,7 @@ The tradeoff is permanent modification without undo capability.
 
 - Python: Excellent system integration, ExifTool wrapper
 - JavaScript: Responsive UI without page reloads
-- Flask: Lightweight bridge between them
+- Waitress: Lightweight bridge between them
 - Minimal dependencies compared to full frameworks
 
 ### Why SQLite?
@@ -92,7 +93,7 @@ The application uses multiple thread pools:
    - File system for photo storage
 
 2. **Application Layer**
-   - Flask REST API
+   - Waitress REST API
    - Business logic in Python
    - Caching for performance
    - Thread pools for parallel operations
@@ -200,7 +201,3 @@ Built with assistance from:
 - Anthropic's Claude
 - OpenAI's GPT models
 - The open source community
-
-Special thanks to:
-- Phil Harvey for ExifTool
-- Flask and Python communities

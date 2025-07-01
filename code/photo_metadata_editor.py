@@ -140,10 +140,10 @@ _env_config = {}
 _env_path = Path(__file__).parent / '.env'
 
 if not _env_path.exists():
-    print("📝 Creating .env file with default values...")
+    print("Creating .env file with default values...")
     _env_path.write_text(ENV_TEMPLATE)
-    print(f"✓ Created {_env_path}")
-    print("\n⚠️  IMPORTANT: Edit .env with your camera/scanner information!")
+    print(f"Created {_env_path}")
+    print("\n IMPORTANT: Edit .env with your camera/scanner information!")
     print("   Then run ./code/photo_metadata_editor.py /path/to/your/photos.\n")
     sys.exit(1)
 
@@ -502,7 +502,7 @@ def cleanup_database_connections():
         STATE.database._pool.close_idle_connections()
 
 atexit.register(cleanup_database_connections)
-# Ensure pipeline threads don’t keep the interpreter alive
+# Ensure pipeline threads don-t keep the interpreter alive
 atexit.register(lambda: STATE.pipeline_executor.shutdown(wait=False, cancel_futures=True))
 
 
@@ -929,13 +929,13 @@ Filename: {filename}
 
         # ---- first-call synchronisation ----
         with self._llm_lock:
-            if self.llm is not None:           # another thread won the race
+            if self.llm is not None:
                 return self.llm
             try:
                 print("Downloading LLM model (first time only).")
                 model_path = hf_hub_download(
-                    repo_id="bartowski/Mistral-7B-Instruct-v0.3-GGUF",
-                    filename="Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+                    repo_id="hflb/Mistral-7B-Instruct-v0.3-Filename-Finetune",
+                    filename="mistral-7b-finetuned-q4_k_m.gguf",
                     cache_dir=self.cache_dir
                 )
 
@@ -947,7 +947,7 @@ Filename: {filename}
                     verbose=False,
                     n_threads=8
                 )
-                print("✓ LLM model loaded successfully")
+                print("LLM model loaded successfully")
             except Exception as e:
                 logger.error(f"Failed to load LLM model: {e}")
                 raise
@@ -978,7 +978,7 @@ Filename: {filename}
             with self._llm_lock:
                 response = self.llm(
                     prompt,
-                    max_tokens=400,  # Increased for richer output
+                    max_tokens=400,
                     temperature=0.1,
                     stop=["Filename:"],
                     echo=False
@@ -1314,13 +1314,13 @@ def start_llm_worker():
         LLM_WORKER_STOP.clear()
         MODEL_WARMED.clear()  # CRITICAL: Reset the gate for fresh start
         
-        # Step 1 – start *one* warming worker
+        # Step 1 - start *one* warming worker
         t0 = threading.Thread(target=llm_worker_thread, daemon=True)
         t0.start()
         LLM_WORKER_THREADS.append(t0)
         LLM_WORKER_THREAD = t0
 
-        # Step 2 – Spawn second worker but with a delay
+        # Step 2 - Spawn second worker but with a delay
         def _spawn_followers():
             MODEL_WARMED.wait()                       # block until first parse done
             time.sleep(2.0)  # Wait 2s after warm-up before adding second worker
@@ -1769,7 +1769,7 @@ class PhotoDatabase:
                             return float('inf')
                     return float('inf')
 
-                # ↩︎  sort by (seq, filename) so identical seqs get a deterministic order
+                # Sort by (seq, filename) so identical seqs get a deterministic order
                 results.sort(key=lambda fp: (get_sequence_number(fp),
                                              Path(fp).name.lower()))
             else:
@@ -1996,7 +1996,7 @@ class Gazetteer:
         
         # Load CSV data
         if not csv_path.exists():
-            print(f"⚠️  Gazetteer CSV not found: {csv_path}")
+            print(f"Gazetteer CSV not found: {csv_path}")
             return
         
         try:
@@ -2016,10 +2016,10 @@ class Gazetteer:
                         self._data[(city_lower, state_lower)] = (lat, lon, tz)
                         self._proper_names[(city_lower, state_lower)] = (city, state)
             
-            print(f"✓ Loaded {len(self._data)} cities from CSV")
+            print(f"Loaded {len(self._data)} cities from CSV")
             
         except Exception as e:
-            print(f"❌ Error loading gazetteer: {e}")
+            print(f"Error loading gazetteer: {e}")
     
     def _load_apple_cache(self):
         """Load Apple geocoding cache from disk"""
@@ -2040,7 +2040,7 @@ class Gazetteer:
                     self._data[key] = self._apple_cache[key]
                     self._proper_names[key] = (row['city'], row['state'])
             
-            print(f"✓ Loaded {len(self._apple_cache)} entries from Apple cache")
+            print(f"Loaded {len(self._apple_cache)} entries from Apple cache")
         except Exception as e:
             logger.warning(f"Error loading Apple cache: {e}")
     
@@ -2646,7 +2646,7 @@ class PhotoPipeline:
                 self._emit_event({
                     'type': 'status',
                     'level': 'info',
-                    'message': '✓ Successfully connected to Mac B'
+                    'message': 'Successfully connected to Mac B'
                 })
                 return True
             
@@ -2758,7 +2758,7 @@ class PhotoPipeline:
         self._emit_event({
             'type': 'status',
             'level': 'info',
-            'message': f'✓ Staged {len(staged_files)} files ({len(failed_files)} failed)'
+            'message': f'Staged {len(staged_files)} files ({len(failed_files)} failed)'
         })
         
         # Write manifest for tracking
@@ -2959,7 +2959,7 @@ class PhotoPipeline:
                 self._emit_event({
                     'type': 'status',
                     'level': 'info',
-                    'message': f'✓ Successfully transferred {len(transferred)} files'
+                    'message': f'Successfully transferred {len(transferred)} files'
                 })
                 return True
                 
@@ -3023,7 +3023,7 @@ class PhotoPipeline:
                                     self._emit_event({
                                         'type': 'status',
                                         'level': 'info',
-                                        'message': f'✓ Found manifest with {len(manifest.get("files", []))} files'
+                                        'message': f'Found manifest with {len(manifest.get("files", []))} files'
                                     })
                                     return manifest
                                 
@@ -3161,7 +3161,7 @@ class PhotoPipeline:
                     self._emit_event({
                         'type': 'status',
                         'level': 'debug',
-                        'message': f'✓ Updated {Path(file_info["original_path"]).name}'
+                        'message': f'Updated {Path(file_info["original_path"]).name}'
                     })
                 else:
                     self._emit_event({
@@ -3202,7 +3202,7 @@ class PhotoPipeline:
         self._emit_event({
             'type': 'status',
             'level': 'info',
-            'message': f'✓ Database updated for {successful_imports}/{len(imported_files)} files'
+            'message': f'Database updated for {successful_imports}/{len(imported_files)} files'
         })
         
         # Cleanup Mac B files after import
@@ -3279,7 +3279,7 @@ class PhotoPipeline:
                 self._emit_event({
                     'type': 'status',
                     'level': 'info',
-                    'message': f'✓ Cleaned up {status_text} batch {batch_id}'
+                    'message': f'Cleaned up {status_text} batch {batch_id}'
                 })
                 
         except Exception as e:
@@ -3317,7 +3317,7 @@ class PhotoPipeline:
                     self._emit_event({
                         'type': 'status',
                         'level': 'info',
-                        'message': '✓ Cleaned orphaned files'
+                        'message': 'Cleaned orphaned files'
                     })
                 else:
                     error = stderr.read().decode()
@@ -3347,7 +3347,7 @@ class PhotoPipeline:
                 self._emit_event({
                     'type': 'status',
                     'level': 'info',
-                    'message': '✓ Cleaned up staging directory'
+                    'message': 'Cleaned up staging directory'
                 })
         except Exception as e:
             self._emit_event({
@@ -3396,7 +3396,7 @@ class PhotoPipeline:
                             self._emit_event({
                                 'type': 'status',
                                 'level': 'info',
-                                'message': f'✓ Created {path}'
+                                'message': f'Created {path}'
                             })
                 
                 # Check if Folder Actions are attached to IncomingPhotos
@@ -3425,13 +3425,13 @@ class PhotoPipeline:
                     self._emit_event({
                         'type': 'status',
                         'level': 'warning',
-                        'message': '⚠️  No Folder Actions attached to IncomingPhotos on Mac B'
+                        'message': 'No Folder Actions attached to IncomingPhotos on Mac B'
                     })
                 else:
                     self._emit_event({
                         'type': 'status',
                         'level': 'info',
-                        'message': f'✓ Folder Actions attached to IncomingPhotos ({folder_action_count} workflow(s))'
+                        'message': f'Folder Actions attached to IncomingPhotos ({folder_action_count} workflow(s))'
                     })
                 
                 return True
@@ -3566,7 +3566,7 @@ class PhotoPipeline:
                 'type': 'complete',
                 'batch_id': batch_id,
                 'success': True,
-                'message': f'✅ Batch {batch_id} complete! Imported {len(manifest.get("files", []))} photos successfully'
+                'message': f'Batch {batch_id} complete! Imported {len(manifest.get("files", []))} photos successfully'
             })
             
             return True
@@ -3574,7 +3574,7 @@ class PhotoPipeline:
         except Exception as e:
             self._emit_event({
                 'type': 'error',
-                'message': f'❌ Batch failed: {e}'
+                'message': f'Batch failed: {e}'
             })
             
             # Update batch status
@@ -3713,10 +3713,10 @@ def setup_exiftool() -> bool:
     
     if exiftool_path.exists() and lib_path.exists():
         STATE.exiftool_path = exiftool_path
-        print(f"✓ ExifTool found at: {exiftool_path}")
+        print(f"ExifTool found at: {exiftool_path}")
         return True
     
-    print(f"📥 Downloading ExifTool v{EXIFTOOL_VERSION}...")
+    print(f"Downloading ExifTool v{EXIFTOOL_VERSION}...")
     
     try:
         temp_file = TOOLS_DIR / "exiftool.tar.gz"
@@ -3736,11 +3736,11 @@ def setup_exiftool() -> bool:
                               capture_output=True, text=True)
         if result.returncode == 0:
             STATE.exiftool_path = exiftool_path
-            print(f"✓ ExifTool {result.stdout.strip()} installed")
+            print(f"ExifTool {result.stdout.strip()} installed")
             return True
             
     except Exception as e:
-        print(f"❌ Error setting up ExifTool: {e}")
+        print(f"Error setting up ExifTool: {e}")
     
     return False
 
@@ -3843,7 +3843,7 @@ def read_metadata_from_file(filepath: Path) -> Tuple[Optional[DateInfo], Optiona
             city_source  = (DataSource.SYSTEM if city else None),
             state_source = (DataSource.SYSTEM if state else None),
             country      = country,
-            country_code = country_code.strip() if country_code else '',  # Remove padding
+            country_code = country_code.strip() if country_code else '',
             country_source = (DataSource.SYSTEM if country else None),
             postal_code  = postal_code,
             neighborhood = neighborhood,
@@ -4845,14 +4845,14 @@ def get_suggestions(filepath):
         else:
             return jsonify({'status': status})
     else:
-        # Not in queue yet ⇒ enqueue a parse job and mark pending
+        # Not in queue yet = enqueue a parse job and mark pending
         LLM_PARSE_RESULTS[filepath] = {'status': 'pending', 'result': None}
         # priority 0, parse_type "all" to match what /api/current uses
         LLM_PARSE_QUEUE.put((0, filepath, 'all'))
 
         # --- Look-ahead pre-fetch: queue the next 3 photos ---------------------
         try:
-            # Build the current filtered list and locate this photo’s index
+            # Build the current filtered list and locate this photo's index
             filtered_list = STATE.database.get_filtered_photos(STATE.current_filter)
             idx = filtered_list.index(filepath)
 
@@ -4871,7 +4871,7 @@ def get_suggestions(filepath):
                     LLM_PARSE_QUEUE.put((1, tail_fp, 'all'))  # lower priority
             # ---------------------------------------------------------------------
         except ValueError:
-            # filepath not found in list (edge-case) – just ignore
+            # filepath not found in list (edge-case) - just ignore
             pass
         # -----------------------------------------------------------------------
         return jsonify({'status': 'pending'})
@@ -5703,10 +5703,10 @@ def initialize_session(folder_path: str):
     
     # Report results - same as original
     if processed_photos:
-        print(f"✓ Processed {len(processed_photos)} new/updated photos")
+        print(f"Processed {len(processed_photos)} new/updated photos")
     
     if failed_photos:
-        print(f"⚠ Failed to process {len(failed_photos)} photos")
+        print(f"Failed to process {len(failed_photos)} photos")
     
     # Pre-generate grid thumbnails for better performance
     print("\nGenerating thumbnails for grid view...")
@@ -5769,7 +5769,7 @@ def initialize_session(folder_path: str):
                 percent = (completed / total_tasks) * 100
                 print(f"  Generating thumbnails: {completed}/{total_tasks} ({percent:.1f}%) - {failed} failed", end='\r')
     
-    print(f"\n✓ Generated {completed - failed} thumbnails successfully ({failed} failed)")
+    print(f"\nGenerated {completed - failed} thumbnails successfully ({failed} failed)")
     
     # Initialize LLM parser (model only, no pre-parsing)
     if USE_LLM_PARSER and _LLM_AVAILABLE:
@@ -5777,7 +5777,7 @@ def initialize_session(folder_path: str):
             print("\nInitializing LLM filename parser...")
             STATE.filename_parser = FilenameParser(cache_dir=DATA_DIR / ".llm_cache")
             STATE.filename_parser.load_model()
-            print("✓ LLM parser ready (parse-on-demand mode)")
+            print("LLM parser ready (parse-on-demand mode)")
             
             # Start the LLM worker thread
             start_llm_worker()
@@ -5785,7 +5785,7 @@ def initialize_session(folder_path: str):
         except Exception as e:
             logger.error(f"Failed to initialize LLM parser: {e}")
             STATE.filename_parser = None
-            print(f"⚠ LLM parser initialization failed: {e}")
+            print(f"LLM parser initialization failed: {e}")
             print("  Falling back to regex parser")
     
     # Initialize gazetteer
@@ -5803,11 +5803,11 @@ def initialize_session(folder_path: str):
     
     # Check MKLocalSearch availability
     if _mk_local_search_available:
-        print("\n✓ Apple geocoding available via MKLocalSearch")
+        print("\nApple geocoding available via MKLocalSearch")
         print("  - Address geocoding")
         print("  - POI search")
     else:
-        print("\n⚠ MKLocalSearch unavailable – using CSV only")
+        print("\nMKLocalSearch unavailable - using CSV only")
 
 # ============================================================================
 # MAIN FUNCTION
@@ -5816,32 +5816,32 @@ def initialize_session(folder_path: str):
 def main():
     # Optional quick test mode
     if '--test' in sys.argv:
-        print("Testing Apple geocoding…")
+        print("Testing Apple geocoding...")
         try:
             # Test with a simple query first
             print("Testing MKLocalSearch availability...")
             if _mk_local_search_available:
-                print("✓ MKLocalSearch is available")
+                print("MKLocalSearch is available")
             else:
-                print("✗ MKLocalSearch is NOT available")
+                print("MKLocalSearch is NOT available")
                 
             addr = _geocode_location("1600 Amphitheatre Pkwy, Mountain View CA")
             if addr:
                 lat, lon, city, state, landmark = addr
-                print(f"✓ Address test: {city}, {state} ({lat:.4f}, {lon:.4f})")
+                print(f"Address test: {city}, {state} ({lat:.4f}, {lon:.4f})")
             else:
-                print("✗ Address test failed")
+                print("Address test failed")
 
             poi = _geocode_location("Golden Gate Bridge")
             if poi:
                 lat, lon, city, state, landmark = poi
-                print(f"✓ POI test: {landmark or 'Golden Gate Bridge'} in {city}, {state}")
+                print(f"POI test: {landmark or 'Golden Gate Bridge'} in {city}, {state}")
             else:
-                print("✗ POI test failed")
+                print("POI test failed")
 
             print("All tests passed!")
         except Exception as e:
-            print(f"✗ Test failed: {e}")
+            print(f"Test failed: {e}")
             import traceback
             traceback.print_exc()
         sys.exit(0)
@@ -5898,8 +5898,8 @@ def main():
     flask_thread.start()
 
     # Wait until the Flask port is accepting connections, then launch
-    # the user’s preferred browser at the correct URL.
-    for _ in range(30):            # ~3 s total (30 × 0.1 s)
+    # the user's preferred browser at the correct URL.
+    for _ in range(30):            # ~3 s total (30 x 0.1 s)
         try:
             socket.create_connection(('127.0.0.1', WEB_PORT), timeout=0.1).close()
             webbrowser.open(f'http://localhost:{WEB_PORT}')
@@ -5911,7 +5911,7 @@ def main():
     try:
         AppHelper.runConsoleEventLoop()
     except KeyboardInterrupt:
-        print("\nShutting down…")
+        print("\nShutting down...")
         # Gracefully stop background workers
         stop_llm_worker()           # uses helper we already have:contentReference[oaicite:2]{index=2}
         STATE.shutdown_db_worker()  # cleans up DB thread & queue:contentReference[oaicite:3]{index=3}

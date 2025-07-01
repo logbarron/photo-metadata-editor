@@ -68,21 +68,21 @@ These tags are:
 
 ## Status Indicators
 
-- 🟢 **Green "User" badge** - You entered this
-- 🟠 **Orange "System" badge** - Tool filled this
-- ✅ **Green check** - Already imported to Photos
-- 📤 **Send icon** - Ready for import
-- 💾 **"Save First" button** - You must save before sending to Photos
+- **Green "User" badge** - You entered this
+- **Orange "System" badge** - Tool filled this
+- **Green check** - Already imported to Photos
+- **Send icon** - Ready for import
+- **"Save First" button** - You must save before sending to Photos
 
 ## Button States
 
 ### Send to Photos Button
-- **"💾 Save First"** - Changes not saved yet
-- **"📤 Send to Photos"** - Ready to transfer
-- **"✅ Already in Photos"** - Previously imported (click to enable re-send)
-- **"⚠️ Click again to re-send"** - Confirm creating duplicate (3 second timeout)
+- **"Save First"** - Changes not saved yet
+- **"Send to Photos"** - Ready to transfer
+- **"Already in Photos"** - Previously imported (click to enable re-send)
+- **"Click again to re-send"** - Confirm creating duplicate (3 second timeout)
 
-## ⚠️ Important
+## Important
 
 **This tool permanently modifies files!** Always keep backups.
 

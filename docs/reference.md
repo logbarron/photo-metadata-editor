@@ -7,10 +7,10 @@ Architecture, configuration, troubleshooting, and performance optimization.
 ### System Components
 
 ```
-┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Web Browser   │────▶│ Flask Server │────▶│   SQLite    │
-│  (JavaScript)   │◀────│  (Python)    │◀────│  Database   │
-└─────────────────┘     └──────────────┘     └─────────────┘
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────┐
+│   Web Browser   │────▶│ Waitress Server │────▶│   SQLite    │
+│  (JavaScript)   │◀────│    (Python)     │◀────│  Database   │
+└─────────────────┘     └─────────────────┘     └─────────────┘
                                │
                                ├──────────────┐
                                ▼              ▼
@@ -297,8 +297,8 @@ ssh -vvv -i ~/.ssh/pipeline_key user@mac-b.local
 
 ExifTool tags modified:
 ```
--DateTimeOriginal      # When photo was taken
--CreateDate           # File creation date
+-DateTimeOriginal    # When photo was taken
+-CreateDate          # File creation date
 -ModifyDate          # File modification date
 -Make                # Camera manufacturer
 -Model               # Camera model
@@ -306,11 +306,11 @@ ExifTool tags modified:
 -GPSLongitude        # Longitude
 -GPSLatitudeRef      # N/S
 -GPSLongitudeRef     # E/W
--XMP:City           # City name
--XMP:State          # State/Province
--XMP:Country        # Country (always "United States")
--Keywords           # Status tracking tags (MissingDate, MissingLocation)
--Subject            # Same tags (for compatibility)
+-XMP:City            # City name
+-XMP:State           # State/Province
+-XMP:Country         # Country (always "United States")
+-Keywords            # Status tracking tags (MissingDate, MissingLocation)
+-Subject             # Same tags (for compatibility)
 ```
 
 ## Security Considerations
@@ -333,15 +333,15 @@ ExifTool tags modified:
 - Database can be corrupted if interrupted
 - Always maintain external backups
 
-## Advanced Topics
+## Additional Topics
 
-### Custom City Database
+### City Database
 1. Download the Basic version (free with attribution) https://simplemaps.com/data/us-cities
 2. Place at `data/uscities.csv`
 3. Provides offline city lookup
 4. Falls back to Apple Maps for landmarks
 
-### Batch Processing Tips
+### Batch Processing
 - Use grid view for visual grouping
 - Process by event or location
 - Take advantage of frequent locations
@@ -368,5 +368,5 @@ The model runs with these settings:
 
 4-bit quantization for efficiency
 GPU acceleration when available
-2048 token context window
+400 token context window
 Temperature 0.1 for consistent results

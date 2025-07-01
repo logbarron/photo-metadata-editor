@@ -1,6 +1,6 @@
 # User Guide
 
-Complete guide to fixing dates and locations on your digitized photos.
+Guide to fixing dates and locations on digitized photos
 
 ## Interface Overview
 
@@ -142,7 +142,7 @@ Changes are permanent - there is no undo.
 | **Tab** | Next field | In date fields |
 | **Shift+Tab** | Previous field | In date fields |
 
-## Advanced Features
+## Additional Features
 
 ### Grid View
 
@@ -177,8 +177,8 @@ Useful when photos were scanned in chronological order. Non-numeric endings sort
 For photos already imported to Apple Photos:
 
 1. **Single Photo Mode Only** - Feature disabled in grid view
-2. First click shows: **"✅ Already in Photos"**
-3. Click again within 3 seconds: **"⚠️ Click again to re-send"**
+2. First click shows: **"Already in Photos"**
+3. Click again within 3 seconds: **"Click again to re-send"**
 4. Third click confirms and re-sends
 5. Creates duplicates in Apple Photos - use carefully
 
@@ -188,10 +188,10 @@ The button changes based on photo status:
 
 | Button Text | Meaning | Action Required |
 |-------------|---------|-----------------|
-| **💾 Save First** | Changes not saved | Save before sending |
-| **📤 Send to Photos** | Ready to transfer | Click to send |
-| **✅ Already in Photos** | Previously imported | Click to enable re-send |
-| **⚠️ Click again to re-send** | Confirm re-send | Click again within 3 seconds |
+| **Save First** | Changes not saved | Save before sending |
+| **Send to Photos** | Ready to transfer | Click to send |
+| **Already in Photos** | Previously imported | Click to enable re-send |
+| **Click again to re-send** | Confirm re-send | Click again within 3 seconds |
 
 > **Note**: "Send to Photos" requires [Pipeline Setup](pipeline.md) for Mac-to-Mac transfer.
 

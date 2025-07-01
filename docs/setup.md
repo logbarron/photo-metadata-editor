@@ -50,19 +50,19 @@ The first run creates a configuration file:
 
 You'll see:
 ```
-📝 Creating .env file with default values...
-✓ Created /path/to/code/.env
+Creating .env file with default values...
+Created /path/to/code/.env
 
-⚠️  IMPORTANT: Edit .env with your camera/scanner information!
+IMPORTANT: Edit .env with your camera/scanner information
    Then run this command again.
 ```
 
-### Step 4: Configure Your Scanner
+### Step 4: Configure The Env
 
-Edit `code/.env` with your scanner/camera details:
+Edit `code/.env` with your camera/scanner details:
 
 ```bash
-nano code/.env  # Opens in TextEdit
+nano code/.env
 ```
 
 Update these values:
@@ -94,7 +94,7 @@ The tool automatically:
    - Required for reading/writing metadata
    - Installs to `tools/exiftool/`
 
-2. **Downloads LLM Model** (Mistral-7B, ~4GB)
+2. **Downloads Fine Tuned LLM Model** (Mistral-7B, ~4GB)
    - Required for intelligent filename parsing
    - One-time download from Hugging Face
    - Stores in `data/.llm_cache/`
@@ -151,7 +151,7 @@ The `.env` file supports these settings:
 
 ### Required Settings
 ```ini
-# Your scanner information (required)
+# Your camera/scanner information (required)
 CAMERA_MAKE=YourBrand
 CAMERA_MODEL=YourModel
 IMAGE_DESCRIPTION=Camera Scanned Image
@@ -243,7 +243,7 @@ If outdated, uv will handle it automatically.
 
 ### Filename Format
 
-For best results with smart detection, name your files:
+For best results with detection, files should have:
 `Description_City_ST_Month_Day_Year_Sequence.heic`
 
 Example: `Birthday_Party_Denver_CO_June_15_1995_0001.heic`
@@ -278,6 +278,6 @@ Once setup is complete:
 
 ## Important Warnings
 
-⚠️ **File Modification Warning**: This tool permanently modifies your photo files. Original metadata is overwritten and cannot be recovered. Always maintain backups before processing.
+**File Modification Warning**: This tool permanently modifies your photo files. Original metadata is overwritten and cannot be recovered. Always maintain backups before processing.
 
-⚠️ **Format Limitation**: Only HEIC format is supported.
+**Format Limitation**: Only HEIC format is supported.

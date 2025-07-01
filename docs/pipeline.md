@@ -138,7 +138,7 @@ You should connect without a password prompt. Type `exit` to disconnect.
 - Delete items after import: **UNCHECKED**
 
 #### Action 5: Run Shell Script (Manifest)
-- **⚠️ CRITICAL**: Right-click this action → **Ignore Input**
+- **CRITICAL**: Right-click this action → **Ignore Input**
 - Shell: `/bin/bash`
 - Pass input: **as arguments** (even though ignoring)
 - Copy the manifest script from `docs/automator-scripts/manifest.sh`
