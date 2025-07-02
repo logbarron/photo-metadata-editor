@@ -1455,7 +1455,10 @@ class PhotoDatabase:
                     suggested_location_reasoning TEXT,
                     suggested_location_landmark TEXT,
                     suggestion_parsed_at TIMESTAMP,
-                    suggestion_filename TEXT
+                    suggestion_filename TEXT,
+                    
+                    -- Soft delete tracking
+                    deleted_at TIMESTAMP
                 )
             ''')
             
@@ -1486,7 +1489,7 @@ class PhotoDatabase:
                     postal_code TEXT DEFAULT '',
                     neighborhood TEXT DEFAULT '',
                     category TEXT NOT NULL,
-                    use_count INTEGER DEFAULT 1,
+                    use_count INTEGER DEFAULT 0,
                     last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(city, state, country, landmark_name, street)
                 )
@@ -1720,7 +1723,8 @@ class PhotoDatabase:
                 # Photos that haven't been saved yet (including skipped)
                 query = '''
                     SELECT filepath FROM photos 
-                    WHERE user_action != 'saved' OR user_action IS NULL
+                    WHERE (user_action != 'saved' OR user_action IS NULL)
+                    AND deleted_at IS NULL
                 '''
             elif filter_type == 'needs_both':
                 # Saved photos that still need both
@@ -1728,6 +1732,7 @@ class PhotoDatabase:
                     SELECT filepath FROM photos 
                     WHERE user_action = 'saved' 
                     AND needs_date = 1 AND needs_location = 1
+                    AND deleted_at IS NULL
                 '''
             elif filter_type == 'needs_date':
                 # Saved photos that only need date
@@ -1735,6 +1740,7 @@ class PhotoDatabase:
                     SELECT filepath FROM photos 
                     WHERE user_action = 'saved'
                     AND needs_date = 1 AND needs_location = 0
+                    AND deleted_at IS NULL
                 '''
             elif filter_type == 'needs_location':
                 # Saved photos that only need location
@@ -1742,6 +1748,7 @@ class PhotoDatabase:
                     SELECT filepath FROM photos 
                     WHERE user_action = 'saved'
                     AND needs_date = 0 AND needs_location = 1
+                    AND deleted_at IS NULL
                 '''
             elif filter_type == 'complete':
                 # Saved photos with both date and location
@@ -1749,9 +1756,10 @@ class PhotoDatabase:
                     SELECT filepath FROM photos 
                     WHERE user_action = 'saved'
                     AND needs_date = 0 AND needs_location = 0
+                    AND deleted_at IS NULL
                 '''
             else:
-                query = 'SELECT filepath FROM photos'
+                query = 'SELECT filepath FROM photos WHERE deleted_at IS NULL'
             
             results = [row[0] for row in conn.execute(query).fetchall()]
             
@@ -1783,17 +1791,22 @@ class PhotoDatabase:
         with self.get_db() as conn:
             row = conn.execute('''
                 SELECT
-                    COUNT(*)                                                         AS total,
-                    SUM(CASE WHEN user_action != 'saved' THEN 1 ELSE 0 END)          AS needs_review,
+                    COUNT(CASE WHEN deleted_at IS NULL THEN 1 END)                   AS total,
+                    SUM(CASE WHEN user_action != 'saved' AND deleted_at IS NULL THEN 1 ELSE 0 END) AS needs_review,
                     SUM(CASE WHEN user_action = 'saved'
-                              AND needs_date = 1 AND needs_location = 1 THEN 1 END)  AS needs_both,
+                              AND needs_date = 1 AND needs_location = 1 
+                              AND deleted_at IS NULL THEN 1 END)                     AS needs_both,
                     SUM(CASE WHEN user_action = 'saved'
-                              AND needs_date = 1 AND needs_location = 0 THEN 1 END)  AS needs_date,
+                              AND needs_date = 1 AND needs_location = 0 
+                              AND deleted_at IS NULL THEN 1 END)                     AS needs_date,
                     SUM(CASE WHEN user_action = 'saved'
-                              AND needs_date = 0 AND needs_location = 1 THEN 1 END)  AS needs_location,
+                              AND needs_date = 0 AND needs_location = 1 
+                              AND deleted_at IS NULL THEN 1 END)                     AS needs_location,
                     SUM(CASE WHEN user_action = 'saved'
-                              AND needs_date = 0 AND needs_location = 0 THEN 1 END)  AS complete,
-                    SUM(CASE WHEN user_action = 'skipped' THEN 1 ELSE 0 END)         AS skipped
+                              AND needs_date = 0 AND needs_location = 0 
+                              AND deleted_at IS NULL THEN 1 END)                     AS complete,
+                    SUM(CASE WHEN user_action = 'skipped' 
+                              AND deleted_at IS NULL THEN 1 ELSE 0 END)              AS skipped
                 FROM photos
             ''').fetchone()
             return dict(row)
@@ -5094,7 +5107,7 @@ def get_grid_photos(filter_type):
             # Each thread gets its own connection
             with STATE.database.get_db() as conn:
                 row = conn.execute(
-                    'SELECT imported_at FROM photos WHERE filepath = ?',
+                    'SELECT imported_at, last_saved_at FROM photos WHERE filepath = ?',
                     (filepath,)
                 ).fetchone()
             
@@ -5103,7 +5116,8 @@ def get_grid_photos(filter_type):
                 'filename': photo_path.name,
                 'filepath': filepath,
                 'thumbnail': create_thumbnail(photo_path, max_size=(120, 120)),
-                'imported_at': row['imported_at'] if row else None
+                'imported_at': row['imported_at'] if row else None,
+                'last_saved_at': row['last_saved_at'] if row else None
             }
 
             STATE.database._pool.release_connection()
@@ -5490,6 +5504,113 @@ def initialize_session(folder_path: str):
         raise ValueError("No .heic photos found in directory")
     
     print(f"Found {len(STATE.photos_list)} photos")
+    
+    # ===== DETECT RENAMES AND HANDLE DELETIONS =====
+    print("Checking for renamed or deleted files...")
+    with STATE.database.get_db() as conn:
+        # Get all current file paths
+        current_paths = {str(p): p for p in STATE.photos_list}
+        
+        # Find database entries for files that no longer exist at their recorded path
+        # Exclude already soft-deleted files
+        all_db_photos = conn.execute('''
+            SELECT filepath, file_hash, filename 
+            FROM photos 
+            WHERE file_hash IS NOT NULL 
+            AND deleted_at IS NULL
+        ''').fetchall()
+        
+        missing_photos = []
+        existing_hashes = set()
+        
+        for row in all_db_photos:
+            if row['filepath'] in current_paths:
+                # File still exists at same path
+                existing_hashes.add(row['file_hash'])
+            else:
+                # File missing from original path
+                missing_photos.append(row)
+        
+        if missing_photos:
+            print(f"  Found {len(missing_photos)} missing files...")
+            rename_count = 0
+            
+            # Build a set of hashes we need to find
+            missing_hashes = {m['file_hash']: m for m in missing_photos}
+            
+            # Check each current file to see if it matches a missing hash
+            for current_path, photo_path in current_paths.items():
+                # Skip if we already know this file is in the database
+                if any(row['filepath'] == current_path for row in all_db_photos):
+                    continue
+                
+                try:
+                    # Calculate hash for potential rename
+                    file_hash = calculate_file_hash(photo_path)
+                    
+                    # Is this one of our missing files?
+                    if file_hash in missing_hashes and file_hash not in existing_hashes:
+                        missing = missing_hashes[file_hash]
+                        print(f"  Renamed: {missing['filename']} → {photo_path.name}")
+                        
+                        # Update the database with new path
+                        conn.execute('''
+                            UPDATE photos 
+                            SET filepath = ?, filename = ?
+                            WHERE file_hash = ? AND filepath = ?
+                        ''', (str(photo_path), photo_path.name, file_hash, missing['filepath']))
+                        
+                        # Remove from missing_hashes since we found it
+                        del missing_hashes[file_hash]
+                        existing_hashes.add(file_hash)
+                        rename_count += 1
+                        
+                except Exception as e:
+                    # File might not be readable
+                    print(f"  Error checking {photo_path.name}: {e}")
+                    continue
+            
+            # Any remaining items in missing_hashes are truly deleted
+            deleted_count = len(missing_hashes)
+            
+            if rename_count > 0:
+                print(f"  Updated {rename_count} renamed files")
+            
+            if deleted_count > 0:
+                print(f"  Found {deleted_count} deleted files")
+                
+                # Soft delete: mark with timestamp instead of removing
+                for file_hash, missing in missing_hashes.items():
+                    print(f"  Marking as deleted: {missing['filename']}")
+                    conn.execute('''
+                        UPDATE photos 
+                        SET deleted_at = CURRENT_TIMESTAMP
+                        WHERE file_hash = ? AND filepath = ?
+                    ''', (file_hash, missing['filepath']))
+                
+                print(f"  Marked {deleted_count} files as deleted")
+        
+        # Also check if any previously deleted files have been restored
+        deleted_photos = conn.execute('''
+            SELECT filepath, file_hash, filename 
+            FROM photos 
+            WHERE deleted_at IS NOT NULL
+        ''').fetchall()
+        
+        restored_count = 0
+        for row in deleted_photos:
+            if row['filepath'] in current_paths:
+                print(f"  Restored: {row['filename']}")
+                conn.execute('''
+                    UPDATE photos 
+                    SET deleted_at = NULL
+                    WHERE filepath = ?
+                ''', (row['filepath'],))
+                restored_count += 1
+        
+        if restored_count > 0:
+            print(f"  Restored {restored_count} previously deleted files")
+    # ===== END RENAME/DELETE DETECTION =====
     
     # Helper function to process a single photo
     def process_single_photo(photo):

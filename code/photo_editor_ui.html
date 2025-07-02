@@ -1036,7 +1036,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             <!-- Action Buttons -->
             <div class="action-buttons">
                 <button class="btn btn-primary" id="save-btn" onclick="saveAndNext()" title="Save metadata (⌘S)">Save</button>
-                <button class="btn btn-import" id="send-button" onclick="sendToPhotos()">📤 Send to Photos</button>
+                <button class="btn btn-import" id="send-button" onclick="sendToPhotos()">Send to Photos</button>
             </div>
             
             <div id="import-status" style="margin-top: 12px; display: none;"></div>
@@ -1085,7 +1085,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             // Reset button text if needed
             const sendBtn = document.getElementById('send-button');
             if (sendBtn && currentPhoto && currentPhoto.imported_at) {
-                sendBtn.textContent = '✅ Already in Photos';
+                sendBtn.textContent = 'Already in Photos';
                 sendBtn.classList.remove('warning-state');
             }
         }
@@ -1147,9 +1147,9 @@ Licensed under GPL v3 - see LICENSE file for details.
             updateSelectionUI();
         }
 
-        function toggleGridSelection(filepath, isImported) {
-            // Don't allow selection of imported photos
-            if (isImported) return;
+        function toggleGridSelection(filepath, isImported, isUnsaved) {
+            // Don't allow selection of imported photos or unsaved photos
+            if (isImported || isUnsaved) return;
             
             const checkbox = event.target;
             if (checkbox.checked) {
@@ -1176,7 +1176,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                         // First click - enter warning state
                         resendPending = true;
                         if (sendBtn) {
-                            sendBtn.textContent = '⚠️ Click again to re-send';
+                            sendBtn.textContent = 'Click again to re-send';
                             sendBtn.classList.add('warning-state');
                         }
                         
@@ -1231,7 +1231,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 const alreadyImported = status.filter(p => p.imported_at);
                 
                 if (alreadyImported.length > 0) {
-                    if (!confirm(`⚠️ WARNING: ${alreadyImported.length} photos are already imported!\n\n` +
+                    if (!confirm(`WARNING: ${alreadyImported.length} photos are already imported!\n\n` +
                                 `This will create DUPLICATES in Apple Photos.\n\n` +
                                 `Continue anyway?`)) {
                         importStatus.style.display = 'none';
@@ -1256,7 +1256,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 if (importResponse.ok) {
                     const result = await importResponse.json();
                     importStatus.innerHTML = 
-                        `<div style="color: var(--source-filename);">🔄 Processing ${selected.length} photo${selected.length > 1 ? 's' : ''}...</div>`;
+                        `<div style="color: var(--source-filename);">Processing ${selected.length} photo${selected.length > 1 ? 's' : ''}...</div>`;
                     selectedPhotos.clear();
                     updateSelectionUI();
                     
@@ -1266,7 +1266,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 } else {
                     const error = await importResponse.json();
                     importStatus.innerHTML = 
-                        `<div style="color: var(--status-error);">❌ ${error.error || 'Error starting pipeline'}</div>`;
+                        `<div style="color: var(--status-error);">${error.error || 'Error starting pipeline'}</div>`;
                     setTimeout(() => {
                         importStatus.style.display = 'none';
                         if (sendButton) sendButton.disabled = false;
@@ -1278,7 +1278,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             } catch (error) {
                 console.error('Error:', error);
                 importStatus.innerHTML = 
-                    '<div style="color: var(--status-error);">❌ Network error - please try again</div>';
+                    '<div style="color: var(--status-error);">Network error - please try again</div>';
                 setTimeout(() => {
                     importStatus.style.display = 'none';
                     if (sendButton) sendButton.disabled = false;
@@ -1333,7 +1333,6 @@ Licensed under GPL v3 - see LICENSE file for details.
                         // Show completion status
                         const success = status.exit_code === 0 && status.final_status === 'complete';
                         const statusColor = success ? 'var(--status-success)' : 'var(--status-error)';
-                        const statusIcon = success ? '✅' : '❌';
                         const statusText = success ? 'completed successfully' : 'failed';
                         importStatus.innerHTML = 
                             '<div style="color: ' + statusColor + ';">' +
@@ -1517,7 +1516,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             // Show a brief confirmation in the results area
             container.innerHTML = `
                 <div style="padding: 16px; text-align: center; color: #34C759;">
-                    ✓ Selected: ${location.display_primary}
+                    Selected: ${location.display_primary}
                     <div style="font-size: 12px; color: #8E8E93; margin-top: 4px;">
                         ${location.display_secondary}
                     </div>
@@ -1593,7 +1592,6 @@ Licensed under GPL v3 - see LICENSE file for details.
                         const photoContainer = document.querySelector('.photo-container');
                         photoContainer.innerHTML = `
                             <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary);">
-                                <div style="font-size: 48px; margin-bottom: 16px;">📭</div>
                                 <div style="font-size: 18px;">No photos in this filter</div>
                                 <div style="font-size: 14px; margin-top: 8px;">Try a different filter</div>
                             </div>
@@ -1607,6 +1605,21 @@ Licensed under GPL v3 - see LICENSE file for details.
                         document.getElementById('current-date').textContent = 'No photo selected';
                         document.getElementById('current-location').textContent = 'No photo selected';
                         document.getElementById('current-tags').textContent = 'No photo selected';
+                        document.getElementById('current-import-status').textContent = 'No photo selected';
+                        
+                        // Clear photo header
+                        document.getElementById('filename').textContent = 'No photos in filter';
+                        document.getElementById('file-counter').textContent = '0 of 0';
+                        
+                        // Hide suggestion buttons
+                        document.getElementById('date-suggestion-btn').style.display = 'none';
+                        document.getElementById('location-suggestion-btn').style.display = 'none';
+                        const dualContainer = document.getElementById('location-dual-container');
+                        if (dualContainer) dualContainer.remove();
+                        
+                        // Disable action buttons
+                        document.getElementById('save-btn').disabled = true;
+                        document.getElementById('send-button').disabled = true;
                     }
                     return;
                 }
@@ -1920,11 +1933,11 @@ Licensed under GPL v3 - see LICENSE file for details.
             // Update import status display
             if (data.imported_at) {
                 document.getElementById('current-import-status').innerHTML = 
-                    `<span style="color: #34C759;">✅ Imported ${new Date(data.imported_at).toLocaleDateString()}</span>`;
+                    `<span style="color: #34C759;">Imported ${new Date(data.imported_at).toLocaleDateString()}</span>`;
                 // Update send button to show already imported
                 const sendBtn = document.getElementById('send-button');
                 if (sendBtn) {
-                    sendBtn.textContent = '✅ Already in Photos';
+                    sendBtn.textContent = 'Already in Photos';
                 }
             } else {
                 document.getElementById('current-import-status').textContent = 'Not imported';
@@ -1933,23 +1946,22 @@ Licensed under GPL v3 - see LICENSE file for details.
             const sendBtn = document.getElementById('send-button');
             if (sendBtn) {
                 if (data.imported_at) {
-                    sendBtn.textContent = '✅ Already in Photos';
+                    sendBtn.textContent = 'Already in Photos';
                     sendBtn.classList.remove('warning-state');
                 } else if (!data.last_saved_at) {
-                    sendBtn.textContent = '💾 Save First';
+                    sendBtn.textContent = 'Save First';
                 } else {
-                    sendBtn.textContent = '📤 Send to Photos';
+                    sendBtn.textContent = 'Send to Photos';
                 }
             }
 
-            // Navigation buttons
             updateSelectionUI();
+
+            // Ensure save button is enabled when viewing a photo
+            document.getElementById('save-btn').disabled = false;
 
             // Store save status in currentPhoto
             currentPhoto.last_saved_at = data.last_saved_at;
-            
-            // Update selection UI for current mode
-            updateSelectionUI();
             
             // Navigation buttons
             updateNavigationButtons();
@@ -2503,7 +2515,6 @@ Licensed under GPL v3 - see LICENSE file for details.
                     const photoContainer = document.querySelector('.photo-container');
                     photoContainer.innerHTML = `
                         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary);">
-                            <div style="font-size: 48px; margin-bottom: 16px;">📭</div>
                             <div style="font-size: 18px;">No photos in this filter</div>
                         </div>
                     `;
@@ -2596,7 +2607,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                         <button onclick="selectAllVisible()" class="quick-btn" style="margin: 0;">Select All</button>
                         <button onclick="selectNone()" class="quick-btn" style="margin: 0;">Clear</button>
                         <div style="flex: 1;"></div>
-                        <button class="btn btn-import" onclick="sendToPhotos()" id="grid-send-button" disabled style="padding: 8px 16px;">📤 Send to Photos</button>
+                        <button class="btn btn-import" onclick="sendToPhotos()" id="grid-send-button" disabled style="padding: 8px 16px;">Send to Photos</button>
                     </div>
                     <div class="grid-loading" style="grid-column: 1 / -1;">
                         <div class="spinner"></div>
@@ -2635,14 +2646,15 @@ Licensed under GPL v3 - see LICENSE file for details.
                         const isCurrentPhoto = photo.index === startIndex;
                         const isSelected = selectedPhotos.has(photo.filepath);
                         const isImported = photo.imported_at ? true : false;
+                        const isUnsaved = !photo.last_saved_at;
                         gridHTML += `
                             <div class="grid-item${isCurrentPhoto ? ' current-photo' : ''}" data-index="${photo.index}">
                                 <input type="checkbox" 
                                        class="grid-checkbox" 
                                        data-filepath="${photo.filepath}"
                                        ${isSelected ? 'checked' : ''}
-                                       ${isImported ? 'disabled' : ''}
-                                       onclick="event.stopPropagation(); toggleGridSelection('${photo.filepath}', ${isImported})"
+                                       ${isImported || isUnsaved ? 'disabled' : ''}
+                                       onclick="event.stopPropagation(); toggleGridSelection('${photo.filepath}', ${isImported}, ${isUnsaved})"
                                        style="position: absolute; top: 8px; left: 8px; z-index: 10; width: 20px; height: 20px;">
                                 ${isImported ? '<div style="position: absolute; top: 8px; right: 8px; background: #34C759; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">✓</div>' : ''}
                                 <img src="data:image/jpeg;base64,${photo.thumbnail}" alt="${photo.filename}">
