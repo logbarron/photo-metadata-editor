@@ -555,6 +555,20 @@ except Exception as e:
 # UTILITY FUNCTIONS
 # ============================================================================
 
+def extract_sequence_number(filename: str) -> Optional[int]:
+    """Extracts the trailing number from a filename for sorting."""
+    # Remove common extensions
+    base = filename.replace('.heic', '').replace('.HEIC', '')
+    parts = base.split('_')
+    if parts:
+        try:
+            # The last part is assumed to be the sequence number
+            return int(parts[-1])
+        except (ValueError, IndexError):
+            # No valid number found
+            return None
+    return None
+
 def calculate_file_hash(filepath: Path) -> str:
     """Calculate SHA256 hash of file"""
     hash_sha256 = hashlib.sha256()
@@ -1373,6 +1387,7 @@ class PhotoDatabase:
                 CREATE TABLE IF NOT EXISTS photos (
                     filepath TEXT PRIMARY KEY,
                     filename TEXT,
+                    sequence_number INTEGER,
                     file_hash TEXT,
                     file_last_modified TIMESTAMP,
                     
@@ -1549,11 +1564,40 @@ class PhotoDatabase:
                 )
             ''')
             
+            # ====== Database migrations ======
+            # Add sequence_number column if it doesn't exist
+            try:
+                conn.execute('ALTER TABLE photos ADD COLUMN sequence_number INTEGER')
+                # Populate sequence_number for existing photos
+                conn.execute('''
+                    UPDATE photos 
+                    SET sequence_number = (
+                        CASE 
+                            WHEN SUBSTR(filename, -7, 1) = '_' AND 
+                                 SUBSTR(filename, -6, 3) GLOB '[0-9][0-9][0-9]' AND
+                                 SUBSTR(filename, -3) = '.heic' OR SUBSTR(filename, -5) = '.HEIC'
+                            THEN CAST(SUBSTR(filename, -6, 3) AS INTEGER)
+                            ELSE NULL
+                        END
+                    )
+                    WHERE sequence_number IS NULL
+                ''')
+            except Exception:
+                # Column already exists, skip
+                pass
+            
             # ====== Create indexes for performance ======
             conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_batch ON pipeline_queue(batch_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_status ON pipeline_queue(status)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_import_batch ON photos(import_batch_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_imported_at ON photos(imported_at)')
+            
+            # Indexes for filtering frequently queried columns
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_user_action ON photos(user_action)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_needs_flags ON photos(needs_date, needs_location)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_deleted_at ON photos(deleted_at)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_filename ON photos(filename)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_photos_sequence ON photos(sequence_number)')
             
             # Ensure updated_at is set for any existing rows
             conn.execute("UPDATE photos SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
@@ -1717,73 +1761,34 @@ class PhotoDatabase:
             return date_info, location_info
     
     def get_filtered_photos(self, filter_type: str) -> List[str]:
-        """Get photos based on filter"""
+        """Get photos based on filter, sorted by the database."""
         with self.get_db() as conn:
-            if filter_type == 'needs_review':
-                # Photos that haven't been saved yet (including skipped)
-                query = '''
-                    SELECT filepath FROM photos 
-                    WHERE (user_action != 'saved' OR user_action IS NULL)
-                    AND deleted_at IS NULL
-                '''
-            elif filter_type == 'needs_both':
-                # Saved photos that still need both
-                query = '''
-                    SELECT filepath FROM photos 
-                    WHERE user_action = 'saved' 
-                    AND needs_date = 1 AND needs_location = 1
-                    AND deleted_at IS NULL
-                '''
-            elif filter_type == 'needs_date':
-                # Saved photos that only need date
-                query = '''
-                    SELECT filepath FROM photos 
-                    WHERE user_action = 'saved'
-                    AND needs_date = 1 AND needs_location = 0
-                    AND deleted_at IS NULL
-                '''
-            elif filter_type == 'needs_location':
-                # Saved photos that only need location
-                query = '''
-                    SELECT filepath FROM photos 
-                    WHERE user_action = 'saved'
-                    AND needs_date = 0 AND needs_location = 1
-                    AND deleted_at IS NULL
-                '''
-            elif filter_type == 'complete':
-                # Saved photos with both date and location
-                query = '''
-                    SELECT filepath FROM photos 
-                    WHERE user_action = 'saved'
-                    AND needs_date = 0 AND needs_location = 0
-                    AND deleted_at IS NULL
-                '''
-            else:
-                query = 'SELECT filepath FROM photos WHERE deleted_at IS NULL'
-            
-            results = [row[0] for row in conn.execute(query).fetchall()]
-            
-            # Sort based on current mode
+            # Determine the ORDER BY clause based on the global sort mode
             if STATE.sort_by_sequence:
-                # Extract numeric sequence from end of filename for sorting
-                def get_sequence_number(filepath):
-                    filename = Path(filepath).name
-                    base = filename.replace('.heic', '').replace('.HEIC', '')
-                    parts = base.split('_')
-                    if parts:
-                        try:
-                            return int(parts[-1])
-                        except ValueError:
-                            return float('inf')
-                    return float('inf')
-
-                # Sort by (seq, filename) so identical seqs get a deterministic order
-                results.sort(key=lambda fp: (get_sequence_number(fp),
-                                             Path(fp).name.lower()))
+                # Sort by the pre-calculated sequence number, with filename as a tie-breaker.
+                # NULLS LAST ensures photos without a sequence number appear at the end.
+                order_by_clause = "ORDER BY sequence_number ASC NULLS LAST, filename ASC"
             else:
-                # Sort by filename
-                results.sort(key=lambda fp: Path(fp).name.lower())
-            
+                # Default sort by filename
+                order_by_clause = "ORDER BY filename ASC"
+
+            # Base queries for each filter
+            queries = {
+                'needs_review': "WHERE (user_action != 'saved' OR user_action IS NULL) AND deleted_at IS NULL",
+                'needs_both': "WHERE user_action = 'saved' AND needs_date = 1 AND needs_location = 1 AND deleted_at IS NULL",
+                'needs_date': "WHERE user_action = 'saved' AND needs_date = 1 AND needs_location = 0 AND deleted_at IS NULL",
+                'needs_location': "WHERE user_action = 'saved' AND needs_date = 0 AND needs_location = 1 AND deleted_at IS NULL",
+                'complete': "WHERE user_action = 'saved' AND needs_date = 0 AND needs_location = 0 AND deleted_at IS NULL",
+                'all': "WHERE deleted_at IS NULL"
+            }
+
+            where_clause = queries.get(filter_type, queries['all'])
+
+            # Construct the final query
+            full_query = f"SELECT filepath FROM photos {where_clause} {order_by_clause}"
+
+            # Execute and fetch all results directly
+            results = [row[0] for row in conn.execute(full_query).fetchall()]
             return results
     
     def get_stats(self) -> Dict[str, int]:
@@ -5686,6 +5691,7 @@ def initialize_session(folder_path: str):
                     data = {
                         'filepath': normalized_photo_path,
                         'filename': photo.name,
+                        'sequence_number': extract_sequence_number(photo.name),
                         'file_hash': file_hash,
                         'file_last_modified': datetime.fromtimestamp(file_stats.st_mtime).isoformat(),
                         
@@ -5747,6 +5753,7 @@ def initialize_session(folder_path: str):
                         VALUES ({', '.join(placeholders)})
                         ON CONFLICT(filepath) DO UPDATE SET
                             filename = excluded.filename,
+                            sequence_number = excluded.sequence_number,
                             file_hash = excluded.file_hash,
                             file_last_modified = excluded.file_last_modified,
                             original_date_year = excluded.original_date_year,
