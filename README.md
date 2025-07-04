@@ -42,6 +42,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/logbarron/photo-metadata-editor
 cd photo-metadata-editor
 
+# Make script executable
+chmod +x photo_metadata_editor.py
+
 # First run (creates config file)
 ./code/photo_metadata_editor.py /path/to/photos
 
