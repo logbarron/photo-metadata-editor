@@ -817,55 +817,55 @@ Licensed under GPL v3 - see LICENSE file for details.
             text-align: center;
         }
         
-        /* Sort Toggle */
-        .sort-toggle {
+        /* Sort Controls */
+        .sort-container {
             display: flex;
             align-items: center;
             gap: 8px;
-            cursor: pointer;
-            font-size: 12px;
-            color: var(--text-secondary);
         }
-        
-        .sort-toggle input {
-            display: none;
-        }
-        
-        .toggle-slider {
-            width: 36px;
-            height: 20px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            position: relative;
-            transition: background 0.3s ease;
-        }
-        
-        .toggle-slider::after {
-            content: "";
-            position: absolute;
-            top: 2px;
-            left: 2px;
-            width: 16px;
-            height: 16px;
-            background: white;
-            border-radius: 50%;
-            transition: transform 0.3s ease;
-        }
-        
-        .sort-toggle input:checked + .toggle-slider {
-            background: var(--source-user);
-        }
-        
-        .sort-toggle input:checked + .toggle-slider::after {
-            transform: translateX(16px);
-        }
-        
-        .toggle-label {
-            transition: color 0.3s ease;
-        }
-        
-        .sort-toggle input:checked ~ .toggle-label {
+
+        .sort-dropdown {
+            background: var(--bg-tertiary);
             color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            min-width: 120px;
+        }
+
+        .sort-dropdown:hover {
+            background: var(--bg-secondary);
+        }
+
+        .sort-dropdown:focus {
+            outline: none;
+            border-color: var(--source-user);
+        }
+
+        .sort-direction-btn {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 13px;
+            cursor: pointer;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .sort-direction-btn:hover {
+            background: var(--bg-secondary);
+        }
+
+        .sort-direction-btn:active {
+            transform: scale(0.95);
         }
     </style>
 </head>
@@ -875,11 +875,18 @@ Licensed under GPL v3 - see LICENSE file for details.
         <div class="progress-panel">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px;">
                 <h2 style="margin: 0;">Filters</h2>
-                <label class="sort-toggle">
-                    <input type="checkbox" id="sort-toggle" onchange="toggleSort()">
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Sort by #</span>
-                </label>
+                <div class="sort-container">
+                    <select id="sort-field-dropdown" class="sort-dropdown" onchange="setSort()">
+                        <option value="filename">Filename</option>
+                        <option value="sequence">Sequence #</option>
+                        <option value="photo_date">Photo Date</option>
+                        <option value="date_created">Date Created</option>
+                        <option value="date_modified">Date Modified</option>
+                    </select>
+                    <button id="sort-direction-btn" class="sort-direction-btn" onclick="toggleSortDirection()" title="Toggle sort direction">
+                        ↑
+                    </button>
+                </div>
             </div>
             
             <div class="stat-card active" onclick="setFilter('needs_review', this)">
@@ -1061,6 +1068,10 @@ Licensed under GPL v3 - see LICENSE file for details.
         // LLM polling state
         let llmPollTimeout = null;
         let llmPollCount = 0;
+        
+        // Sort state
+        let currentSortField = 'filename';
+        let currentSortDirection = 'ASC';
         
         // Re-send state tracking
         let resendTimeout = null;
@@ -2566,29 +2577,49 @@ Licensed under GPL v3 - see LICENSE file for details.
             }
         }
         
-        // Toggle sort mode
-        async function toggleSort() {
+        // Set sort field and/or direction
+        async function setSort() {
             try {
-                const response = await fetch('/api/toggle_sort', {
+                const field = document.getElementById('sort-field-dropdown').value;
+                
+                const response = await fetch('/api/set_sort', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        field: field, 
+                        direction: currentSortDirection 
+                    })
                 });
                 
                 if (response.ok) {
                     const result = await response.json();
-                    // Reload current view with new sort order
+                    currentSortField = result.sort_field;
+                    currentSortDirection = result.sort_direction;
+                    
+                    // Update UI after sort change
                     if (gridMode) {
-                        // If in grid mode, refresh grid
                         await showGridView(currentGridFilter, 0);
                     } else {
-                        // Reset to first photo with new sort
-                        STATE.current_index = 0;
-                        await loadCurrentPhoto();
+                        await loadCurrentPhoto(); // Will use index 0 set by backend
                     }
                 }
             } catch (error) {
-                console.error('Error toggling sort:', error);
+                console.error('Error setting sort:', error);
             }
+        }
+
+        // Toggle sort direction
+        async function toggleSortDirection() {
+            currentSortDirection = (currentSortDirection === 'ASC') ? 'DESC' : 'ASC';
+            updateSortDirectionButton();
+            await setSort();
+        }
+
+        // Update the arrow icon based on direction
+        function updateSortDirectionButton() {
+            const btn = document.getElementById('sort-direction-btn');
+            btn.innerHTML = (currentSortDirection === 'ASC') ? '↑' : '↓';
+            btn.title = `Sort ${currentSortDirection === 'ASC' ? 'ascending' : 'descending'}`;
         }
         
         // Show grid view
@@ -2795,6 +2826,10 @@ Licensed under GPL v3 - see LICENSE file for details.
         document.addEventListener('DOMContentLoaded', () => {
             initializeLocationSearch();
             loadCurrentPhoto();
+            
+            // Set initial sort UI state
+            document.getElementById('sort-field-dropdown').value = currentSortField;
+            updateSortDirectionButton();
             
             // Make function globally accessible for onclick handlers
             window.acceptLocationSuggestion = acceptLocationSuggestion;

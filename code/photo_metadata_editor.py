@@ -428,7 +428,8 @@ class AppState:
         self.gazetteer: Optional['Gazetteer'] = None
         self.exiftool_path: Optional[Path] = None
         self.location_manager: Optional['LocationManager'] = None
-        self.sort_by_sequence: bool = False
+        self.sort_field: str = "filename"      # Options: filename, sequence, photo_date, date_created, date_modified
+        self.sort_direction: str = "ASC"       # Options: ASC, DESC
         
         # Pipeline infrastructure
         self.pipeline_output: List[str] = []
@@ -1763,14 +1764,30 @@ class PhotoDatabase:
     def get_filtered_photos(self, filter_type: str) -> List[str]:
         """Get photos based on filter, sorted by the database."""
         with self.get_db() as conn:
-            # Determine the ORDER BY clause based on the global sort mode
-            if STATE.sort_by_sequence:
-                # Sort by the pre-calculated sequence number, with filename as a tie-breaker.
-                # NULLS LAST ensures photos without a sequence number appear at the end.
-                order_by_clause = "ORDER BY sequence_number ASC NULLS LAST, filename ASC"
+            # Build ORDER BY clause based on sort field and direction
+            direction = STATE.sort_direction
+
+            if STATE.sort_field == "filename":
+                order_by_clause = f"ORDER BY filename {direction}"
+            elif STATE.sort_field == "sequence":
+                order_by_clause = f"ORDER BY sequence_number {direction} NULLS LAST, filename {direction}"
+            elif STATE.sort_field == "photo_date":
+                # Complex sorting by year, month, day components
+                order_by_clause = (
+                    f"ORDER BY "
+                    f"CASE WHEN original_date_year IS NULL THEN 1 ELSE 0 END, "
+                    f"CAST(original_date_year AS INTEGER) {direction}, "
+                    f"CAST(original_date_month AS INTEGER) {direction}, "
+                    f"CAST(original_date_day AS INTEGER) {direction}, "
+                    f"filename {direction}"
+                )
+            elif STATE.sort_field == "date_created":
+                order_by_clause = f"ORDER BY file_last_modified {direction} NULLS LAST"
+            elif STATE.sort_field == "date_modified":
+                order_by_clause = f"ORDER BY updated_at {direction} NULLS LAST"
             else:
-                # Default sort by filename
-                order_by_clause = "ORDER BY filename ASC"
+                # Fallback to filename
+                order_by_clause = f"ORDER BY filename {direction}"
 
             # Base queries for each filter
             queries = {
@@ -5205,14 +5222,29 @@ def check_city():
     
     return jsonify({'proper_city': None, 'exists': None})
 
-@app.route('/api/toggle_sort', methods=['POST'])
-def toggle_sort():
-    """Toggle between filename and sequence number sorting"""
-    STATE.sort_by_sequence = not STATE.sort_by_sequence
+@app.route('/api/set_sort', methods=['POST'])
+def set_sort():
+    """Set the sort field and direction"""
+    data = request.get_json()
+    new_field = data.get('field')
+    new_direction = data.get('direction')
+    
+    # Validate inputs
+    valid_fields = ['filename', 'sequence', 'photo_date', 'date_created', 'date_modified']
+    valid_directions = ['ASC', 'DESC']
+    
+    if new_field and new_field in valid_fields:
+        STATE.sort_field = new_field
+    if new_direction and new_direction in valid_directions:
+        STATE.sort_direction = new_direction
+    
+    # Reset to first photo when sort changes
     STATE.current_index = 0
+    
     return jsonify({
         'success': True,
-        'sort_by_sequence': STATE.sort_by_sequence
+        'sort_field': STATE.sort_field,
+        'sort_direction': STATE.sort_direction
     })
 
 # ============================================================================

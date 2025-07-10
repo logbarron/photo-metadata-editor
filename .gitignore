@@ -64,6 +64,9 @@ ENV/
 *~
 .nova/
 
+# Development/documentation files
+CLAUDE.md
+
 # Logs
 *.log
 *.log.*
