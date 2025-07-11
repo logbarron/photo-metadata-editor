@@ -7,8 +7,8 @@ Guide to fixing dates and locations on digitized photos
 The editor has three main panels:
 
 ### Left Panel - Filters and Statistics
+- **Sort dropdown** 5 options for ordering with ASC/DESC Control
 - **Filter buttons** showing photo counts by status
-- **Sort toggle** for filename vs sequence number ordering
 - **Current metadata** display for selected photo
 
 ### Center Panel - Photo Preview
@@ -149,38 +149,37 @@ Changes are permanent - there is no undo.
 Click any active filter again to see grid view:
 - Thumbnails of all photos in that filter
 - 50 photos per page with pagination
-- Click any thumbnail to jump to that photo
+- Single click any thumbnail to see current metadata
+- Double click any thumbnail to jump to that photo
 - Checkboxes for selecting multiple photos
 - Green ✓ indicator on imported photos
 
 ### Batch Selection (Grid View)
 
 1. Enter grid view by clicking active filter
-2. Use checkboxes to select multiple photos
-3. "Select All" button selects visible photos, Clear removes
-4. Selected photos can be sent to Apple Photos as batch
-5. All selected photos must be saved first
+2. Use shift and single to select multiple photos
+3. Selected photos can be sent to Apple Photos as batch
+4. All selected photos must be saved first
 
 ### Sort Options
 
-Toggle **"Sort by #"** in the left panel to change ordering:
+Use the **Sort** dropdown in the left panel to change ordering:
 
 | Sort Mode | Description | Example Order |
 |-----------|-------------|---------------|
-| **Off** (default) | Alphabetical by filename | `Chicago_1995.heic`, `Denver_1994.heic` |
-| **On** | By number at end of filename | `scan_0001.heic`, `scan_0002.heic`, `scan_0010.heic` |
-
-Useful when photos were scanned in chronological order. Non-numeric endings sort to the end.
+| **Filename** (default) | Alphabetical by filename | `Chicago_1995.heic`, `Denver_1994.heic` |
+| **Sequence #** | By number at end of filename | `scan_0001.heic`, `scan_0002.heic`, `scan_0010.heic` |
+| **Photo Date** | By date photo was taken | Oldest to newest photos |
+| **Date Created** | By file creation date | Oldest to newest files |
+| **Date Modified** | By file modification date | Oldest to newest modifications |
 
 ### Re-sending Photos
 
 For photos already imported to Apple Photos:
-
-1. **Single Photo Mode Only** - Feature disabled in grid view
-2. First click shows: **"Already in Photos"**
-3. Click again within 3 seconds: **"Click again to re-send"**
-4. Third click confirms and re-sends
-5. Creates duplicates in Apple Photos - use carefully
+1. First click shows: **"Already in Photos"**
+2. Click again within 3 seconds: **"Click again to re-send"**
+3. Third click confirms and re-sends
+4. Creates duplicates in Apple Photos - use carefully
 
 ### Send to Photos Button States
 

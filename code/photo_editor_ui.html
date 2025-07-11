@@ -1162,14 +1162,52 @@ Licensed under GPL v3 - see LICENSE file for details.
                 return;
             }
             
+            const sendButton = document.getElementById('send-button');
+            
+            // Handle 2-click pattern for already imported photos
+            if (!resendPending) {
+                // First, check if any photos are already imported
+                try {
+                    const response = await fetch('/api/check-import-status', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({filepaths: selected})
+                    });
+                    
+                    const status = await response.json();
+                    const alreadyImported = status.filter(p => p.imported_at);
+                    
+                    if (alreadyImported.length > 0) {
+                        // First click - enter warning state
+                        resendPending = true;
+                        if (sendButton) {
+                            sendButton.textContent = 'Click again to re-send';
+                            sendButton.classList.add('warning-state');
+                        }
+                        
+                        // Set timeout to revert
+                        resendTimeout = setTimeout(() => {
+                            clearResendState();
+                        }, 3000);
+                        
+                        return; // Don't proceed with send
+                    }
+                } catch (error) {
+                    console.error('Error checking import status:', error);
+                }
+            } else {
+                // Second click - clear timeout and proceed
+                clearResendState();
+                // Continue to normal send flow
+            }
+            
             // Show loading state
             const importStatus = document.getElementById('import-status');
             importStatus.innerHTML = 
-                '<div style="color: var(--source-filename);">Checking import status...</div>';
+                '<div style="color: var(--source-filename);">Sending photos...</div>';
             importStatus.style.display = 'block';
             
             // Disable buttons during operation
-            const sendButton = document.getElementById('send-button');
             const gridSendButton = document.getElementById('grid-send-button');
             const saveBtn = document.getElementById('save-btn');
             
@@ -1178,28 +1216,6 @@ Licensed under GPL v3 - see LICENSE file for details.
             if (saveBtn) saveBtn.disabled = true;
             
             try {
-                // Check for already imported photos
-                const response = await fetch('/api/check-import-status', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({filepaths: selected})
-                });
-                
-                const status = await response.json();
-                const alreadyImported = status.filter(p => p.imported_at);
-                
-                if (alreadyImported.length > 0) {
-                    if (!confirm(`WARNING: ${alreadyImported.length} photos are already imported!\n\n` +
-                                `This will create DUPLICATES in Apple Photos.\n\n` +
-                                `Continue anyway?`)) {
-                        importStatus.style.display = 'none';
-                        if (sendButton) sendButton.disabled = false;
-                        if (gridSendButton) gridSendButton.disabled = false;
-                        if (saveBtn) saveBtn.disabled = false;
-                        updateSelectionUI();
-                        return;
-                    }
-                }
                 
                 // Send photos
                 importStatus.innerHTML = 
