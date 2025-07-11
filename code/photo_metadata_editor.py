@@ -423,6 +423,7 @@ class AppState:
         self.working_dir: Optional[Path] = None
         self.photos_list: List[Path] = []
         self.current_index: int = 0
+        self.selected_index: Optional[int] = None  # For grid mode selections
         self.current_filter: str = "needs_review"
         self.database: Optional['PhotoDatabase'] = None
         self.gazetteer: Optional['Gazetteer'] = None
@@ -4463,8 +4464,9 @@ def index():
     return render_template_string(UI_TEMPLATE)
 
 @app.route('/api/current')
-def get_current():
-    """Get current photo data"""
+@app.route('/api/current/<int:index>')
+def get_current(index=None):
+    """Get current photo data - optionally for a specific index"""
     filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
     
     if not filtered_photos:
@@ -4475,10 +4477,22 @@ def get_current():
             'stats': STATE.database.get_stats()
         }), 404
     
-    if STATE.current_index >= len(filtered_photos):
-        STATE.current_index = 0  # Reset index if out of bounds
+    # Use provided index or fall back to current index
+    photo_index = index if index is not None else STATE.current_index
     
-    filepath = filtered_photos[STATE.current_index]
+    # Validate index
+    if photo_index >= len(filtered_photos) or photo_index < 0:
+        return jsonify({
+            'error': 'Index out of bounds',
+            'requested_index': photo_index,
+            'filtered_total': len(filtered_photos)
+        }), 400
+    
+    # Update selected_index if an index was provided
+    if index is not None:
+        STATE.selected_index = index
+    
+    filepath = filtered_photos[photo_index]
     photo_path = Path(filepath)
     
     # Read from file first
@@ -4595,7 +4609,7 @@ def get_current():
         # Only pre-queue if this is a navigation (not initial load)
         if hasattr(STATE, '_initial_load_complete'):
             for i in range(1, 3):  # Only next 2 photos, not 5
-                next_index = STATE.current_index + i
+                next_index = photo_index + i
                 if next_index < len(filtered_photos):
                     next_filepath = filtered_photos[next_index]
                     # Only queue if not already processed or queued
@@ -4621,7 +4635,8 @@ def get_current():
     response = {
         'filename': photo_path.name,
         'filepath': str(photo_path),
-        'current_index': STATE.current_index,
+        'current_index': photo_index,
+        'selected_index': STATE.selected_index,
         'filtered_total': len(filtered_photos),
         'current_filter': STATE.current_filter,
         'image_data': create_thumbnail(photo_path),
@@ -4921,10 +4936,13 @@ def save_metadata():
     data = request.json
     filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
     
-    if not filtered_photos or STATE.current_index >= len(filtered_photos):
+    # Use selected_index if available (grid mode), otherwise current_index
+    photo_index = STATE.selected_index if STATE.selected_index is not None else STATE.current_index
+    
+    if not filtered_photos or photo_index >= len(filtered_photos):
         return jsonify({'error': 'No photo selected'}), 400
     
-    filepath = filtered_photos[STATE.current_index]
+    filepath = filtered_photos[photo_index]
     photo_path = Path(filepath)
     
     # Build DateInfo from request
@@ -4964,6 +4982,15 @@ def save_metadata():
     location_info = None
     location_id = None
     
+    # Get current location_id from database to preserve it
+    with STATE.database.get_db() as conn:
+        current_photo = conn.execute(
+            'SELECT location_id FROM photos WHERE filepath = ?',
+            (filepath,)
+        ).fetchone()
+        if current_photo:
+            location_id = current_photo['location_id']
+    
     # Check for preserved GPS first
     if preserve_gps := data.get('preserve_gps'):
         # Create minimal LocationInfo to preserve GPS
@@ -4972,6 +4999,7 @@ def save_metadata():
             gps_lon=preserve_gps.get('gps_lon'),
             gps_source=DataSource(preserve_gps.get('gps_source', 'system'))
         )
+        # IMPORTANT: Keep the existing location_id when preserving GPS
     elif smart_location_data := data.get('smart_location'):
         # Create SmartLocation from frontend data
         smart_location = SmartLocation(
@@ -5091,6 +5119,7 @@ def navigate():
     total = len(filtered_photos)
     
     STATE.current_index = max(0, min(STATE.current_index + direction, total - 1))
+    STATE.selected_index = None  # Clear selection when navigating
     
     return jsonify({
         'success': True,
@@ -5173,6 +5202,7 @@ def set_filter():
     if new_filter in ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete']:
         STATE.current_filter = new_filter
         STATE.current_index = 0
+        STATE.selected_index = None  # Clear selection when changing filters
         return jsonify({'success': True})
     
     return jsonify({'error': 'Invalid filter'}), 400

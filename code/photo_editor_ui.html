@@ -143,8 +143,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         }
         
         .grid-item:hover {
-            transform: scale(1.05);
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
             z-index: 10;
         }
 
@@ -154,6 +153,21 @@ Licensed under GPL v3 - see LICENSE file for details.
             outline-offset: 2px;
             animation: pulse 0.6s ease-out;
         }
+        
+        /* Highlight the selected thumbnail (being edited) */
+        .grid-item.selected-photo {
+            outline: 3px solid var(--source-user);
+            outline-offset: 2px;
+            box-shadow: 0 0 20px rgba(52, 199, 89, 0.3);
+        }
+        
+        /* When a photo is both current and selected */
+        .grid-item.current-photo.selected-photo {
+            outline: 3px solid var(--source-user);
+            outline-offset: 2px;
+            box-shadow: 0 0 20px rgba(52, 199, 89, 0.3);
+        }
+        
 
         @keyframes pulse {
             0%, 100% { transform: scale(1); }
@@ -940,7 +954,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         <div class="photo-preview">
             <div class="photo-header">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div id="filename" style="font-size: 16px; font-weight: 500;">Loading...</div>
+                    <div id="filename" style="font-size: 16px; font-weight: 500; overflow-x: auto; white-space: nowrap; max-width: 70%; padding-bottom: 2px;">Loading...</div>
                     <div id="file-counter" style="font-size: 14px; color: var(--text-secondary);">0 of 0</div>
                 </div>
             </div>
@@ -1117,97 +1131,30 @@ Licensed under GPL v3 - see LICENSE file for details.
                 const canSend = currentPhoto && currentPhoto.last_saved_at;
                 if (sendButton) sendButton.disabled = !canSend;
             } else {
-                // In grid mode, update selection count and button
-                const gridCount = document.getElementById('grid-selection-count');
-                const gridSendButton = document.getElementById('grid-send-button');
-                
-                if (gridCount) {
-                    gridCount.textContent = `${selectedPhotos.size} photos selected`;
-                }
-                if (gridSendButton) {
-                    gridSendButton.disabled = selectedPhotos.size === 0;
+                // In grid mode, send button should be enabled if we have any selected photos
+                if (sendButton) {
+                    sendButton.disabled = selectedPhotos.size === 0;
                 }
             }
         }
         
-        function selectAllVisible() {
-            if (gridMode) {
-                // In grid mode, select all visible non-imported photos
-                const checkboxes = document.querySelectorAll('.grid-checkbox:not(:disabled)');
-                checkboxes.forEach(cb => {
-                    cb.checked = true;
-                    selectedPhotos.add(cb.dataset.filepath);
-                });
-            } else {
-                // In single photo mode, add current photo if not imported
-                selectedPhotos.clear();
-                if (currentPhoto && !currentPhoto.imported_at) {
-                    selectedPhotos.add(currentPhoto.filepath);
-                }
-            }
-            updateSelectionUI();
-        }
+        // Removed - no longer needed without select all functionality
         
         function selectNone() {
             selectedPhotos.clear();
-            // Clear all grid checkboxes if in grid mode
+            // Clear selected visual state in grid mode
             if (gridMode) {
-                const checkboxes = document.querySelectorAll('.grid-checkbox');
-                checkboxes.forEach(cb => cb.checked = false);
+                document.querySelectorAll('.grid-item.selected-photo').forEach(item => {
+                    item.classList.remove('selected-photo');
+                });
             }
             updateSelectionUI();
         }
 
-        function toggleGridSelection(filepath, isImported, isUnsaved) {
-            // Don't allow selection of imported photos or unsaved photos
-            if (isImported || isUnsaved) return;
-            
-            const checkbox = event.target;
-            if (checkbox.checked) {
-                selectedPhotos.add(filepath);
-            } else {
-                selectedPhotos.delete(filepath);
-            }
-            updateSelectionUI();
-        }
+        // No longer needed - replaced by shift-click functionality
         
         async function sendToPhotos() {
-            // In single photo mode, send current photo
-            if (!gridMode) {
-                if (!currentPhoto) {
-                    alert('No photo currently loaded.');
-                    return;
-                }
-                
-                // Handle two-click pattern for already imported photos
-                if (currentPhoto.imported_at) {
-                    const sendBtn = document.getElementById('send-button');
-                    
-                    if (!resendPending) {
-                        // First click - enter warning state
-                        resendPending = true;
-                        if (sendBtn) {
-                            sendBtn.textContent = 'Click again to re-send';
-                            sendBtn.classList.add('warning-state');
-                        }
-                        
-                        // Set timeout to revert
-                        resendTimeout = setTimeout(() => {
-                            clearResendState();
-                        }, 3000);
-                        
-                        return; // Don't proceed with send
-                    } else {
-                        // Second click - clear timeout and proceed
-                        clearResendState();
-                        // Continue to normal send flow
-                    }
-                }
-                
-                selectedPhotos.clear();
-                selectedPhotos.add(currentPhoto.filepath);
-            }
-            
+            // Always use selectedPhotos set, regardless of mode
             const selected = Array.from(selectedPhotos);
             
             if (selected.length === 0) {
@@ -2402,10 +2349,22 @@ Licensed under GPL v3 - see LICENSE file for details.
                     }
                     
                     if (result.has_next) {
-                        loadCurrentPhoto();
+                        if (gridMode) {
+                            // In grid mode, reload the grid to reflect any filter/sort changes
+                            const currentIndex = currentPhoto.current_index;
+                            await showGridView(currentGridFilter, currentIndex);
+                        } else {
+                            loadCurrentPhoto();
+                        }
                     } else {
                         // Just reload to show empty state
-                        loadCurrentPhoto();
+                        if (!gridMode) {
+                            loadCurrentPhoto();
+                        } else {
+                            // Reload grid even when no next photo
+                            const currentIndex = currentPhoto.current_index;
+                            await showGridView(currentGridFilter, currentIndex);
+                        }
                     }
                 } else {
                     alert(result.error || 'Failed to save metadata');
@@ -2438,6 +2397,9 @@ Licensed under GPL v3 - see LICENSE file for details.
         
         // Navigate photos
         async function navigatePhoto(direction) {
+            // Don't navigate if in grid mode
+            if (gridMode) return;
+            
             // Clear any pending re-send state
             clearResendState();
             
@@ -2490,6 +2452,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             if (gridMode && filter !== currentGridFilter) {
                 gridMode = false;
                 currentGridFilter = null;
+                selectedPhotos.clear(); // Clear all selections when exiting grid
                 // Clear the photo container
                 const photoContainer = document.querySelector('.photo-container');
                 photoContainer.innerHTML = `
@@ -2539,6 +2502,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 // Clicking grid card again - exit grid mode
                 gridMode = false;
                 currentGridFilter = null;
+                selectedPhotos.clear(); // Clear all selections when exiting grid
                 if (element) {
                     element.classList.add('active');
                 }
@@ -2548,6 +2512,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 // Normal filter change
                 gridMode = false;
                 currentGridFilter = null;
+                selectedPhotos.clear(); // Clear selections on any filter change
                 
                 if (element) {
                     element.classList.add('active');
@@ -2631,15 +2596,10 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             // Update UI for grid mode
             updateSelectionUI();
+            
+            // Keep the existing metadata panel visible - just replace photo area with grid
             photoContainer.innerHTML = `
                 <div class="photo-grid" id="photo-grid">
-                    <div class="grid-selection-bar" style="grid-column: 1 / -1; background: var(--bg-secondary); padding: 12px 20px; border-radius: 8px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
-                        <span id="grid-selection-count" style="font-weight: 600; color: var(--source-filename);">0 photos selected</span>
-                        <button onclick="selectAllVisible()" class="quick-btn" style="margin: 0;">Select All</button>
-                        <button onclick="selectNone()" class="quick-btn" style="margin: 0;">Clear</button>
-                        <div style="flex: 1;"></div>
-                        <button class="btn btn-import" onclick="sendToPhotos()" id="grid-send-button" disabled style="padding: 8px 16px;">Send to Photos</button>
-                    </div>
                     <div class="grid-loading" style="grid-column: 1 / -1;">
                         <div class="spinner"></div>
                         <div>Loading photos...</div>
@@ -2671,23 +2631,15 @@ Licensed under GPL v3 - see LICENSE file for details.
                         firstBatch = false;
                     }
                     
-                    // Add photos to grid WITH current photo highlighting and checkboxes
+                    // Add photos to grid
                     let gridHTML = '';
                     data.photos.forEach(photo => {
                         const isCurrentPhoto = photo.index === startIndex;
                         const isSelected = selectedPhotos.has(photo.filepath);
-                        const isImported = photo.imported_at ? true : false;
-                        const isUnsaved = !photo.last_saved_at;
                         gridHTML += `
-                            <div class="grid-item${isCurrentPhoto ? ' current-photo' : ''}" data-index="${photo.index}">
-                                <input type="checkbox" 
-                                       class="grid-checkbox" 
-                                       data-filepath="${photo.filepath}"
-                                       ${isSelected ? 'checked' : ''}
-                                       ${isImported || isUnsaved ? 'disabled' : ''}
-                                       onclick="event.stopPropagation(); toggleGridSelection('${photo.filepath}', ${isImported}, ${isUnsaved})"
-                                       style="position: absolute; top: 8px; left: 8px; z-index: 10; width: 20px; height: 20px;">
-                                ${isImported ? '<div style="position: absolute; top: 8px; right: 8px; background: #34C759; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">✓</div>' : ''}
+                            <div class="grid-item${isCurrentPhoto ? ' current-photo' : ''}${isSelected ? ' selected-photo' : ''}" 
+                                 data-index="${photo.index}" 
+                                 data-filepath="${photo.filepath}">
                                 <img src="data:image/jpeg;base64,${photo.thumbnail}" alt="${photo.filename}">
                                 <div class="grid-index">${photo.index + 1}</div>
                             </div>
@@ -2700,9 +2652,39 @@ Licensed under GPL v3 - see LICENSE file for details.
                     // Add click handlers to new items
                     gridContainer.querySelectorAll('.grid-item:not([data-listener])').forEach(item => {
                         item.setAttribute('data-listener', 'true');
-                        item.addEventListener('click', () => {
+                        
+                        // Track clicks for double-click detection
+                        let clickTimer = null;
+                        
+                        item.addEventListener('click', async (e) => {
                             const index = parseInt(item.dataset.index);
-                            exitGridMode(index);
+                            const filepath = item.dataset.filepath;
+                            
+                            if (e.shiftKey) {
+                                // Shift-click to toggle selection
+                                if (selectedPhotos.has(filepath)) {
+                                    selectedPhotos.delete(filepath);
+                                    item.classList.remove('selected-photo');
+                                } else {
+                                    selectedPhotos.add(filepath);
+                                    item.classList.add('selected-photo');
+                                }
+                                // Don't change the loaded photo on shift-click
+                                return;
+                            }
+                            
+                            if (clickTimer) {
+                                // Double click detected - exit grid mode
+                                clearTimeout(clickTimer);
+                                clickTimer = null;
+                                await exitGridMode(index);
+                            } else {
+                                // Single click - load metadata
+                                clickTimer = setTimeout(() => {
+                                    clickTimer = null;
+                                }, 300);
+                                await loadPhotoAtIndex(index);
+                            }
                         });
                     });
                     
@@ -2731,6 +2713,191 @@ Licensed under GPL v3 - see LICENSE file for details.
             }
         }
         
+        // Load photo metadata at specific index (for grid mode)
+        async function loadPhotoAtIndex(index) {
+            try {
+                const response = await fetch(`/api/current/${index}`);
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    console.error('Failed to load photo:', data.error);
+                    return;
+                }
+                
+                // Update current photo data
+                currentPhoto = data;
+                
+                // Update only metadata panel, not photo area
+                updateMetadataPanel(data);
+                
+                // Update grid visual state
+                updateGridSelection(index);
+                
+            } catch (error) {
+                console.error('Error loading photo at index:', error);
+            }
+        }
+        
+        // Update only the metadata panel (for grid mode)
+        function updateMetadataPanel(data) {
+            // Reset unknown button states
+            unknownDateActive = false;
+            unknownLocationActive = false;
+            document.querySelectorAll('.quick-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Clear previous location state
+            locationSearchState.currentLocation = null;
+            locationSearchState.results = [];
+            document.getElementById('location-search').style.borderColor = '';
+
+            // Photo header
+            document.getElementById('filename').textContent = data.filename;
+            document.getElementById('file-counter').textContent = 
+                `${data.current_index + 1} of ${data.filtered_total}`;
+            
+            // Stats
+            updateStats(data.stats);
+            
+            // Clear inputs first
+            clearAllInputs();
+            
+            // Fill date fields
+            if (data.date) {
+                setDateFields(data.date);
+            }
+            
+            // Suggestions
+            dateSuggestion = data.date_suggestion;
+            locationSuggestion = data.location_suggestion;
+            
+            // Check if LLM parsing is pending
+            if (data.llm_status === 'pending') {
+                // Start polling for results
+                startLLMPolling(data.filepath);
+            }
+            
+            // Update suggestion buttons (same logic as updateUI)
+            const dateSugBtn = document.getElementById('date-suggestion-btn');
+            if (data.llm_status === 'pending' && !dateSuggestion) {
+                dateSugBtn.textContent = 'Analyzing...';
+                dateSugBtn.style.display = 'block';
+                dateSugBtn.disabled = true;
+            } else if (dateSuggestion) {
+                let sugText = 'Suggested: ';
+                if (dateSuggestion.month && dateSuggestion.year) {
+                    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                    const monthIndex = parseInt(dateSuggestion.month) - 1;
+                    const monthName = (monthIndex >= 0 && monthIndex < 12) ? 
+                                     monthNames[monthIndex] : dateSuggestion.month;
+                    sugText += dateSuggestion.day ? 
+                        `${monthName} ${dateSuggestion.day}, ${dateSuggestion.year}` :
+                        `${monthName} ${dateSuggestion.year}`;
+                } else if (dateSuggestion.year) {
+                    sugText += dateSuggestion.year;
+                }
+                dateSugBtn.textContent = sugText;
+                dateSugBtn.style.display = 'block';
+                dateSugBtn.disabled = false;
+            } else {
+                dateSugBtn.style.display = 'none';
+            }
+            
+            // Location suggestions (same logic as updateUI)
+            const locSugBtn = document.getElementById('location-suggestion-btn');
+            const existingDualContainer = document.getElementById('location-dual-container');
+            if (existingDualContainer) {
+                existingDualContainer.remove();
+            }
+            
+            if (data.llm_status === 'pending' && !locationSuggestion) {
+                locSugBtn.style.display = 'none';
+                const dualContainer = document.createElement('div');
+                dualContainer.id = 'location-dual-container';
+                dualContainer.className = 'location-dual-container';
+                const analyzingBtn = document.createElement('button');
+                analyzingBtn.className = 'btn';
+                analyzingBtn.textContent = 'Analyzing...';
+                analyzingBtn.disabled = true;
+                dualContainer.appendChild(analyzingBtn);
+                const sectionTitle = locSugBtn.parentNode;
+                sectionTitle.parentNode.insertBefore(dualContainer, sectionTitle.nextSibling);
+            } else if (locationSuggestion && locationSuggestion.primary_search) {
+                locSugBtn.style.display = 'none';
+                const dualContainer = document.createElement('div');
+                dualContainer.id = 'location-dual-container';
+                dualContainer.className = 'location-dual-container';
+                const primaryBtn = document.createElement('button');
+                primaryBtn.className = 'btn';
+                primaryBtn.textContent = `Specific: ${locationSuggestion.primary_search}`;
+                primaryBtn.onclick = function() { 
+                    if (window.acceptLocationSuggestion) {
+                        window.acceptLocationSuggestion(false);
+                    }
+                };
+                dualContainer.appendChild(primaryBtn);
+                if (locationSuggestion.alternate_search) {
+                    const alternateBtn = document.createElement('button');
+                    alternateBtn.className = 'btn alternate';
+                    alternateBtn.textContent = `General: ${locationSuggestion.alternate_search}`;
+                    alternateBtn.onclick = function() { 
+                        if (window.acceptLocationSuggestion) {
+                            window.acceptLocationSuggestion(true);
+                        }
+                    };
+                    dualContainer.appendChild(alternateBtn);
+                }
+                const sectionTitle = locSugBtn.parentNode;
+                sectionTitle.parentNode.insertBefore(dualContainer, sectionTitle.nextSibling);
+            } else {
+                locSugBtn.style.display = 'none';
+            }
+            
+            // Current metadata display
+            updateCurrentMetadataDisplay(data);
+
+            // Update import status display
+            if (data.imported_at) {
+                document.getElementById('current-import-status').innerHTML = 
+                    `<span style="color: #34C759;">Imported ${new Date(data.imported_at).toLocaleDateString()}</span>`;
+                const sendBtn = document.getElementById('send-button');
+                if (sendBtn) {
+                    sendBtn.textContent = 'Already in Photos';
+                }
+            } else {
+                document.getElementById('current-import-status').textContent = 'Not imported';
+                const sendBtn = document.getElementById('send-button');
+                if (sendBtn) {
+                    sendBtn.textContent = 'Send to Photos';
+                }
+            }
+
+            // Enable/disable buttons
+            document.getElementById('save-btn').disabled = false;
+            document.getElementById('send-button').disabled = false;
+
+            // Load location suggestions
+            loadFrequentLocations();
+        }
+        
+        // Update grid visual selection
+        function updateGridSelection(selectedIndex) {
+            // Remove previous selection highlight
+            document.querySelectorAll('.grid-item').forEach(item => {
+                item.classList.remove('selected-photo');
+            });
+            
+            // Add selection highlight to new item
+            const selectedItem = document.querySelector(`.grid-item[data-index="${selectedIndex}"]`);
+            if (selectedItem) {
+                selectedItem.classList.add('selected-photo');
+                // Also add to selectedPhotos
+                selectedPhotos.add(selectedItem.dataset.filepath);
+            }
+        }
+        
         // Exit grid mode
         async function exitGridMode(targetIndex = null) {
             gridMode = false;
@@ -2740,15 +2907,30 @@ Licensed under GPL v3 - see LICENSE file for details.
                 card.classList.remove('grid-mode');
             });
             
+            // Clear selected photos in grid mode
+            selectedPhotos.clear();
+            
             // Navigate to specific photo if index provided
-            if (targetIndex !== null && currentPhoto) {
-                const jumpDistance = targetIndex - currentPhoto.current_index;
+            if (targetIndex !== null) {
+                // First, we need to get the current navigation position from the backend
                 try {
-                    const response = await fetch('/api/navigate', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ direction: jumpDistance })
-                    });
+                    // Get current state
+                    const currentResponse = await fetch('/api/current');
+                    const currentData = await currentResponse.json();
+                    
+                    if (currentResponse.ok) {
+                        // Calculate jump from actual current position
+                        const actualCurrentIndex = currentData.current_index;
+                        const jumpDistance = targetIndex - actualCurrentIndex;
+                        
+                        if (jumpDistance !== 0) {
+                            const navResponse = await fetch('/api/navigate', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ direction: jumpDistance })
+                            });
+                        }
+                    }
                 } catch (error) {
                     console.error('Error navigating to photo:', error);
                 }
