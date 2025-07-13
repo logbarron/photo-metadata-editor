@@ -2709,7 +2709,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                     isSearchActive = false;
                 } else {
                     // No current photo, just set the filter normally
-                    setFilter(preSearchFilter);
+                    setFilter(preSearchFilter, null, true);
                 }
             }
             
@@ -2718,7 +2718,7 @@ Licensed under GPL v3 - see LICENSE file for details.
 
         
         // Set filter
-        async function setFilter(filter, element) {
+        async function setFilter(filter, element, preventRefresh = false) {
             // Clear any pending re-send state
             clearResendState();
             
@@ -2817,7 +2817,9 @@ Licensed under GPL v3 - see LICENSE file for details.
                     });
                     
                     if (response.ok) {
-                        await loadCurrentPhoto();
+                        if (!preventRefresh) {
+                            await loadCurrentPhoto();
+                        }
                     }
                     
                 } catch (error) {
