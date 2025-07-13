@@ -99,6 +99,39 @@ Licensed under GPL v3 - see LICENSE file for details.
             background-size: contain;
             opacity: 0.7;
         }
+
+/* Search styles */
+.photo-search-input:focus {
+    outline: none;
+    background: rgba(118, 118, 128, 0.24);
+    border-color: var(--source-filename);
+}
+
+.search-container {
+    position: relative;
+}
+
+.search-wrapper {
+    position: relative;
+}
+
+.search-clear-button {
+    transition: opacity 0.2s ease;
+}
+
+.search-clear-button:hover {
+    opacity: 0.7;
+}
+
+.grid-error {
+    color: var(--status-error);
+    font-size: 14px;
+}
+
+.photo-search-input:focus-visible {
+    outline: 2px solid var(--source-filename);
+    outline-offset: 2px;
+}
         
         /* Grid view styles */
         .photo-grid {
@@ -244,8 +277,11 @@ Licensed under GPL v3 - see LICENSE file for details.
             border-left: 1px solid var(--border-color);
             padding: 24px;
             overflow-y: auto;
+            overflow-x: hidden;
             display: flex;
             flex-direction: column;
+            min-width: 420px;
+            max-width: 420px;
         }
         
         .section-title {
@@ -903,6 +939,28 @@ Licensed under GPL v3 - see LICENSE file for details.
                 </div>
             </div>
             
+            <!-- Search Box -->
+            <div class="search-container" style="margin: 16px 0;">
+                <div class="search-wrapper" style="position: relative;">
+                    <svg class="search-icon" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--text-secondary); pointer-events: none;" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" fill="none" stroke="currentColor"/>
+                    </svg>
+                    <input type="text" 
+                           id="photo-search" 
+                           class="photo-search-input"
+                           placeholder="Search photos"
+                           autocomplete="off"
+                           aria-label="Search photos"
+                           style="width: 100%; height: 36px; padding: 8px 32px 8px 32px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 14px;">
+                    <button class="search-clear-button" id="photo-search-clear" style="display: none; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; padding: 4px; cursor: pointer; color: var(--text-secondary);" aria-label="Clear search">
+                        <svg width="14" height="14" fill="currentColor" viewBox="0 0 14 14" aria-hidden="true">
+                            <path d="M7 0C3.13 0 0 3.13 0 7s3.13 7 7 7 7-3.13 7-7-3.13-7-7-7zm3.5 9.5L9 11 7 9 5 11 3.5 9.5 5.5 7.5 3.5 5.5 5 4l2 2 2-2 1.5 1.5L8.5 7.5l2 2z"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="search-status" style="margin-top: 8px; font-size: 12px; color: var(--text-secondary); display: none;" role="status" aria-live="polite"></div>
+            </div>
+            
             <div class="stat-card active" onclick="setFilter('needs_review', this)">
                 <div class="stat-label">Needs Review</div>
                 <div class="stat-value" style="color: var(--source-filename);" id="stat-needs-review">0</div>
@@ -927,6 +985,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 <div class="stat-label">Complete</div>
                 <div class="stat-value" style="color: var(--status-success);" id="stat-complete">0</div>
             </div>
+
             
             <!-- Current metadata -->
             <div class="current-metadata">
@@ -954,7 +1013,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         <div class="photo-preview">
             <div class="photo-header">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div id="filename" style="font-size: 16px; font-weight: 500; overflow-x: auto; white-space: nowrap; max-width: 70%; padding-bottom: 2px;">Loading...</div>
+                    <div id="filename" style="font-size: 16px; font-weight: 500; overflow-x: auto; white-space: nowrap; width: 250px; padding-bottom: 2px;">Loading...</div>
                     <div id="file-counter" style="font-size: 14px; color: var(--text-secondary);">0 of 0</div>
                 </div>
             </div>
@@ -1087,6 +1146,12 @@ Licensed under GPL v3 - see LICENSE file for details.
         let currentSortField = 'filename';
         let currentSortDirection = 'ASC';
         
+        // Search state
+        let currentSearchTerm = '';
+        let searchDebounceTimer = null;
+        let isSearchActive = false;
+        let preSearchFilter = null;
+        
         // Re-send state tracking
         let resendTimeout = null;
         let resendPending = false;
@@ -1131,9 +1196,10 @@ Licensed under GPL v3 - see LICENSE file for details.
                 const canSend = currentPhoto && currentPhoto.last_saved_at;
                 if (sendButton) sendButton.disabled = !canSend;
             } else {
-                // In grid mode, send button should be enabled if we have any selected photos
+                // In grid mode, only enable if we have selected photos AND current photo is saved
                 if (sendButton) {
-                    sendButton.disabled = selectedPhotos.size === 0;
+                    const canSend = selectedPhotos.size > 0 && currentPhoto && currentPhoto.last_saved_at;
+                    sendButton.disabled = !canSend;
                 }
             }
         }
@@ -1553,7 +1619,9 @@ Licensed under GPL v3 - see LICENSE file for details.
             clearResendState();
             
             try {
-                const response = await fetch('/api/current');
+                const params = new URLSearchParams();
+                if (currentSearchTerm) params.append('search', currentSearchTerm);
+                const response = await fetch(`/api/current?${params}`);
                 const data = await response.json();
                 
                 if (!response.ok) {
@@ -2349,6 +2417,14 @@ Licensed under GPL v3 - see LICENSE file for details.
             }
             
             try {
+                // Add filepath and search to save data
+                if (currentPhoto) {
+                    saveData.filepath = currentPhoto.filepath;
+                }
+                if (currentSearchTerm) {
+                    saveData.search = currentSearchTerm;
+                }
+                
                 const response = await fetch('/api/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2437,7 +2513,11 @@ Licensed under GPL v3 - see LICENSE file for details.
                 const response = await fetch('/api/navigate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ direction: direction })
+                    body: JSON.stringify({ 
+                        direction: direction,
+                        filepath: currentPhoto.filepath,
+                        search: currentSearchTerm || ''
+                    })
                 });
                 
                 if (response.ok) {
@@ -2448,6 +2528,194 @@ Licensed under GPL v3 - see LICENSE file for details.
                 console.error('Error navigating:', error);
             }
         }
+        
+        // Initialize photo search
+        function initializePhotoSearch() {
+            const searchInput = document.getElementById('photo-search');
+            const clearButton = document.getElementById('photo-search-clear');
+            const searchStatus = document.getElementById('search-status');
+            
+            // Check elements exist
+            if (!searchInput || !clearButton || !searchStatus) {
+                console.error('Search elements not found');
+                return;
+            }
+            
+            // Search input handler with debounce
+            searchInput.addEventListener('input', (e) => {
+                const value = e.target.value.trim();
+                clearButton.style.display = value ? 'block' : 'none';
+                
+                // Clear existing timer
+                if (searchDebounceTimer) {
+                    clearTimeout(searchDebounceTimer);
+                }
+                
+                // Set new timer
+                searchDebounceTimer = setTimeout(() => {
+                    performSearch(value);
+                }, 300); // 300ms debounce
+            });
+            
+            // Clear button handler
+            clearButton.addEventListener('click', () => {
+                searchInput.value = '';
+                clearButton.style.display = 'none';
+                clearSearch();
+            });
+            
+            // Handle Enter key
+            searchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (searchDebounceTimer) {
+                        clearTimeout(searchDebounceTimer);
+                    }
+                    performSearch(searchInput.value.trim());
+                }
+            });
+        }
+
+        // Perform search
+        async function performSearch(searchTerm) {
+            currentSearchTerm = searchTerm;
+            
+            if (!searchTerm) {
+                clearSearch();
+                return;
+            }
+            
+            // Store current filter if not searching
+            if (!isSearchActive) {
+                const activeCard = document.querySelector('.stat-card.active');
+                let activeFilter = 'needs_review';
+                if (activeCard) {
+                    const onclickAttr = activeCard.getAttribute('onclick');
+                    const match = onclickAttr.match(/setFilter\('([^']+)'/);
+                    if (match) activeFilter = match[1];
+                }
+                preSearchFilter = gridMode ? currentGridFilter : activeFilter;
+            }
+            
+            isSearchActive = true;
+            
+            // Visual feedback
+            const filterCards = document.querySelectorAll('.stat-card');
+            filterCards.forEach(card => {
+                card.style.opacity = '0.5';
+                card.style.pointerEvents = 'none';
+            });
+            
+            // Show search results in grid view
+            try {
+                // Always use 'all' filter for global search
+                const searchFilter = 'all';
+                
+                // Sync the filter with the server before showing grid
+                await fetch('/api/filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filter: searchFilter })
+                });
+                currentGridFilter = searchFilter;
+                
+                await showGridView(searchFilter, 0);
+            } catch (error) {
+                console.error('Search error:', error);
+                document.getElementById('search-status').textContent = 'Search failed. Please try again.';
+                document.getElementById('search-status').style.display = 'block';
+                
+                // Re-enable filter cards on error
+                const filterCards = document.querySelectorAll('.stat-card');
+                filterCards.forEach(card => {
+                    card.style.opacity = '1';
+                    card.style.pointerEvents = 'auto';
+                });
+            }
+        }
+
+        // Clear search
+        async function clearSearch() {
+            currentSearchTerm = '';
+            isSearchActive = false;
+            
+            // Clear any selections made during search
+            selectedPhotos.clear();
+            
+            // Restore visual state
+            const filterCards = document.querySelectorAll('.stat-card');
+            filterCards.forEach(card => {
+                card.style.opacity = '1';
+                card.style.pointerEvents = 'auto';
+            });
+            
+            // Hide search status
+            document.getElementById('search-status').style.display = 'none';
+            
+            // Restore previous filter or reload current view
+            if (gridMode && currentGridFilter) {
+                await showGridView(currentGridFilter, 0);
+            } else if (preSearchFilter) {
+                // If we have a current photo (single photo mode), stay on it
+                if (currentPhoto && currentPhoto.filepath) {
+                    // Determine which filter this photo belongs to
+                    let photoFilter = preSearchFilter; // default
+                    
+                    // Check the photo's status to determine its actual filter
+                    if (currentPhoto.date && currentPhoto.location) {
+                        // Has both date and location
+                        if (!currentPhoto.date.needs_fix && !currentPhoto.location.needs_fix) {
+                            photoFilter = 'complete';
+                        } else if (currentPhoto.date.needs_fix && currentPhoto.location.needs_fix) {
+                            photoFilter = 'needs_both';
+                        } else if (currentPhoto.date.needs_fix) {
+                            photoFilter = 'needs_date';
+                        } else if (currentPhoto.location.needs_fix) {
+                            photoFilter = 'needs_location';
+                        }
+                    } else if (!currentPhoto.last_saved_at) {
+                        // Not saved yet
+                        photoFilter = 'needs_review';
+                    }
+                    
+                    // Sync to the photo's actual filter
+                    await fetch('/api/filter', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filter: photoFilter })
+                    });
+                    
+                    // Update UI to show the correct filter as active
+                    document.querySelectorAll('.stat-card').forEach(card => {
+                        card.classList.remove('active');
+                    });
+                    const filterCard = Array.from(document.querySelectorAll('.stat-card')).find(card => {
+                        const onclick = card.getAttribute('onclick');
+                        return onclick && onclick.includes(`'${photoFilter}'`);
+                    });
+                    if (filterCard) {
+                        filterCard.classList.add('active');
+                    }
+                    
+                    // Reload current photo with its actual filter
+                    const params = new URLSearchParams();
+                    params.append('filepath', currentPhoto.filepath);
+                    const response = await fetch(`/api/current?${params}`);
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        currentPhoto = data;
+                        updateUI(data);
+                    }
+                } else {
+                    // No current photo, just set the filter normally
+                    setFilter(preSearchFilter);
+                }
+            }
+            
+            preSearchFilter = null;
+        }
+
         
         // Set filter
         async function setFilter(filter, element) {
@@ -2632,7 +2900,11 @@ Licensed under GPL v3 - see LICENSE file for details.
                 let firstBatch = true;
                 
                 while (hasMore) {
-                    const response = await fetch(`/api/grid/${filter}?page=${page}`);
+                    const params = new URLSearchParams({ page: page });
+                    if (currentSearchTerm) {
+                        params.append('search', currentSearchTerm);
+                    }
+                    const response = await fetch(`/api/grid/${filter}?${params}`);
                     const data = await response.json();
                     
                     if (!response.ok) {
@@ -2645,6 +2917,18 @@ Licensed under GPL v3 - see LICENSE file for details.
                         const loadingDiv = gridContainer.querySelector('.grid-loading');
                         if (loadingDiv) loadingDiv.remove();
                         firstBatch = false;
+                        
+                        // Update search status if searching
+                        if (currentSearchTerm) {
+                            const searchStatus = document.getElementById('search-status');
+                            if (data.total > 0) {
+                                searchStatus.textContent = `${data.total} photo${data.total !== 1 ? 's' : ''} found`;
+                                searchStatus.style.display = 'block';
+                            } else {
+                                searchStatus.textContent = 'No photos found';
+                                searchStatus.style.display = 'block';
+                            }
+                        }
                     }
                     
                     // Add photos to grid
@@ -2693,13 +2977,13 @@ Licensed under GPL v3 - see LICENSE file for details.
                                 // Double click detected - exit grid mode
                                 clearTimeout(clickTimer);
                                 clickTimer = null;
-                                await exitGridMode(index);
+                                await exitGridMode(filepath);
                             } else {
                                 // Single click - load metadata
                                 clickTimer = setTimeout(() => {
                                     clickTimer = null;
                                 }, 300);
-                                await loadPhotoAtIndex(index);
+                                await loadPhotoByPath(filepath);
                             }
                         });
                     });
@@ -2708,7 +2992,14 @@ Licensed under GPL v3 - see LICENSE file for details.
                     page++;
                 }
                 
-                // After ALL photos are loaded, scroll to current photo with 30% offset
+                // After ALL photos are loaded, load the first photo's metadata
+                const firstPhoto = gridContainer.querySelector('.grid-item');
+                if (firstPhoto && firstPhoto.dataset.filepath) {
+                    // Load the first photo to update the counter correctly
+                    await loadPhotoByPath(firstPhoto.dataset.filepath);
+                }
+                
+                // Scroll to current photo with 30% offset
                 const target = gridContainer.querySelector('.current-photo');
                 if (target) {
                     setTimeout(() => {
@@ -2729,33 +3020,28 @@ Licensed under GPL v3 - see LICENSE file for details.
             }
         }
         
-        // Load photo metadata at specific index (for grid mode)
-        async function loadPhotoAtIndex(index) {
-            try {
-                const response = await fetch(`/api/current/${index}`);
-                const data = await response.json();
-                
-                if (!response.ok) {
-                    console.error('Failed to load photo:', data.error);
-                    return;
-                }
-                
-                // Update current photo data
-                currentPhoto = data;
-                
-                // Update only metadata panel, not photo area
-                updateMetadataPanel(data);
-                
-                // Update grid visual state
-                updateGridSelection(index);
-                
-            } catch (error) {
-                console.error('Error loading photo at index:', error);
-            }
+        // Load photo metadata by filepath (for grid mode)
+        async function loadPhotoByPath(filepath) {
+            const params = new URLSearchParams();
+            params.append('filepath', filepath);
+            if (currentSearchTerm) params.append('search', currentSearchTerm);
+
+            const res  = await fetch(`/api/current?${params}`);
+            const data = await res.json();
+            if (!res.ok) { console.error('Failed:', data.error); return; }
+
+            currentPhoto = data;          // same as before
+            updateMetadataPanel(data);
+            updateGridSelection(filepath);
         }
         
         // Update only the metadata panel (for grid mode)
         function updateMetadataPanel(data) {
+            // Update filename and counter even in grid mode
+            document.getElementById('filename').textContent = data.filename;
+            document.getElementById('file-counter').textContent = 
+                `${data.current_index + 1} of ${data.filtered_total}`;
+            
             // Reset unknown button states
             unknownDateActive = false;
             unknownLocationActive = false;
@@ -2886,37 +3172,35 @@ Licensed under GPL v3 - see LICENSE file for details.
                 document.getElementById('current-import-status').textContent = 'Not imported';
                 const sendBtn = document.getElementById('send-button');
                 if (sendBtn) {
-                    sendBtn.textContent = 'Send to Photos';
+                    // Check if saved before allowing send
+                    if (!data.last_saved_at) {
+                        sendBtn.textContent = 'Save First';
+                    } else {
+                        sendBtn.textContent = 'Send to Photos';
+                    }
                 }
             }
 
             // Enable/disable buttons
             document.getElementById('save-btn').disabled = false;
-            document.getElementById('send-button').disabled = false;
+            // Only enable send button if photo has been saved
+            document.getElementById('send-button').disabled = !data.last_saved_at;
 
             // Load location suggestions
             loadFrequentLocations();
         }
         
         // Update grid visual selection
-        function updateGridSelection(selectedIndex) {
-            // Remove previous selection highlight
+        function updateGridSelection(filepath) {
             document.querySelectorAll('.grid-item').forEach(item => {
-                item.classList.remove('selected-photo');
+                item.classList.toggle('selected-photo', item.dataset.filepath === filepath);
             });
-            
-            // Add selection highlight to new item
-            const selectedItem = document.querySelector(`.grid-item[data-index="${selectedIndex}"]`);
-            if (selectedItem) {
-                selectedItem.classList.add('selected-photo');
-                // Also add to selectedPhotos
-                selectedPhotos.add(selectedItem.dataset.filepath);
-            }
         }
         
         // Exit grid mode
-        async function exitGridMode(targetIndex = null) {
+        async function exitGridMode(targetFilepath = null) {
             gridMode = false;
+            const wasSearching = isSearchActive;
             
             // Remove grid mode from cards
             document.querySelectorAll('.stat-card').forEach(card => {
@@ -2926,33 +3210,40 @@ Licensed under GPL v3 - see LICENSE file for details.
             // Clear selected photos in grid mode
             selectedPhotos.clear();
             
-            // Navigate to specific photo if index provided
-            if (targetIndex !== null) {
-                // First, we need to get the current navigation position from the backend
+            // Navigate to specific photo if filepath provided
+            if (targetFilepath) {
                 try {
-                    // Get current state
-                    const currentResponse = await fetch('/api/current');
-                    const currentData = await currentResponse.json();
+                    const res = await fetch('/api/select', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            filepath: targetFilepath,
+                            search: currentSearchTerm  // '' if not searching
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error);
                     
-                    if (currentResponse.ok) {
-                        // Calculate jump from actual current position
-                        const actualCurrentIndex = currentData.current_index;
-                        const jumpDistance = targetIndex - actualCurrentIndex;
-                        
-                        if (jumpDistance !== 0) {
-                            const navResponse = await fetch('/api/navigate', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ direction: jumpDistance })
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error navigating to photo:', error);
+                    // data already contains the full photo payload
+                    // Don't call loadCurrentPhoto() - we already have the data
+                    currentPhoto = data;
+                    updateUI(data);
+                    
+                    // Don't clear search - user should stay in search context
+                    // They can manually clear search if they want to go back
+                    return;  // Exit early - we've already loaded the photo
+                } catch (err) {
+                    console.error('Error selecting photo:', err);
+                    // Show error to user instead of silently failing
+                    alert(`Failed to open selected photo: ${err.message || 'Photo not found in current filter'}`);
+                    return; // Don't fall through to loadCurrentPhoto
                 }
             }
             
-            // Load the photo
+            // Don't clear search - user should stay in search context
+            // They can manually clear search if they want to go back
+            
+            // Load the photo only if we didn't navigate to a specific one
             await loadCurrentPhoto();
         }
 
@@ -3031,6 +3322,9 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             // Make function globally accessible for onclick handlers
             window.acceptLocationSuggestion = acceptLocationSuggestion;
+            
+            // Initialize search
+            initializePhotoSearch();
         });
     </script>
 </body>

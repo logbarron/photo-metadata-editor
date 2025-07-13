@@ -422,8 +422,8 @@ class AppState:
     def __init__(self):
         self.working_dir: Optional[Path] = None
         self.photos_list: List[Path] = []
-        self.current_index: int = 0
-        self.selected_index: Optional[int] = None  # For grid mode selections
+        self.current_filepath: Optional[str] = None  # Current photo filepath
+        self.selected_filepath: Optional[str] = None  # For grid mode selections
         self.current_filter: str = "needs_review"
         self.database: Optional['PhotoDatabase'] = None
         self.gazetteer: Optional['Gazetteer'] = None
@@ -1762,18 +1762,17 @@ class PhotoDatabase:
             # Return photo state
             return date_info, location_info
     
-    def get_filtered_photos(self, filter_type: str) -> List[str]:
-        """Get photos based on filter, sorted by the database."""
+    def get_filtered_photos(self, filter_type: str, search_term: str = "") -> List[str]:
+        """Get photos based on filter and optional search term, sorted by the database."""
         with self.get_db() as conn:
             # Build ORDER BY clause based on sort field and direction
             direction = STATE.sort_direction
-
+            
             if STATE.sort_field == "filename":
                 order_by_clause = f"ORDER BY filename {direction}"
             elif STATE.sort_field == "sequence":
                 order_by_clause = f"ORDER BY sequence_number {direction} NULLS LAST, filename {direction}"
             elif STATE.sort_field == "photo_date":
-                # Complex sorting by year, month, day components
                 order_by_clause = (
                     f"ORDER BY "
                     f"CASE WHEN original_date_year IS NULL THEN 1 ELSE 0 END, "
@@ -1789,25 +1788,62 @@ class PhotoDatabase:
             else:
                 # Fallback to filename
                 order_by_clause = f"ORDER BY filename {direction}"
-
+            
             # Base queries for each filter
-            queries = {
-                'needs_review': "WHERE (user_action != 'saved' OR user_action IS NULL) AND deleted_at IS NULL",
-                'needs_both': "WHERE user_action = 'saved' AND needs_date = 1 AND needs_location = 1 AND deleted_at IS NULL",
-                'needs_date': "WHERE user_action = 'saved' AND needs_date = 1 AND needs_location = 0 AND deleted_at IS NULL",
-                'needs_location': "WHERE user_action = 'saved' AND needs_date = 0 AND needs_location = 1 AND deleted_at IS NULL",
-                'complete': "WHERE user_action = 'saved' AND needs_date = 0 AND needs_location = 0 AND deleted_at IS NULL",
-                'all': "WHERE deleted_at IS NULL"
+            filter_queries = {
+                'needs_review': "(user_action != 'saved' OR user_action IS NULL) AND deleted_at IS NULL",
+                'needs_both': "user_action = 'saved' AND needs_date = 1 AND needs_location = 1 AND deleted_at IS NULL",
+                'needs_date': "user_action = 'saved' AND needs_date = 1 AND needs_location = 0 AND deleted_at IS NULL",
+                'needs_location': "user_action = 'saved' AND needs_date = 0 AND needs_location = 1 AND deleted_at IS NULL",
+                'complete': "user_action = 'saved' AND needs_date = 0 AND needs_location = 0 AND deleted_at IS NULL",
+                'all': "deleted_at IS NULL"
             }
-
-            where_clause = queries.get(filter_type, queries['all'])
-
+            
+            where_parts = []
+            
+            # Add filter condition
+            filter_condition = filter_queries.get(filter_type, filter_queries['all'])
+            where_parts.append(f"({filter_condition})")
+            
+            # Add search condition if provided
+            if search_term:
+                search_pattern = f"%{search_term}%"
+                search_conditions = """(
+                    IFNULL(filename, '') LIKE ? OR
+                    IFNULL(CAST(current_date_year AS TEXT), '') LIKE ? OR
+                    IFNULL(CAST(current_date_month AS TEXT), '') LIKE ? OR
+                    IFNULL(CAST(current_date_day AS TEXT), '') LIKE ? OR
+                    IFNULL(current_city, '') LIKE ? OR
+                    IFNULL(current_state, '') LIKE ? OR
+                    IFNULL(current_country, '') LIKE ? OR
+                    IFNULL(current_street, '') LIKE ? OR
+                    IFNULL(current_neighborhood, '') LIKE ? OR
+                    IFNULL(suggested_location_landmark, '') LIKE ? OR
+                    IFNULL(CAST(suggested_date_year AS TEXT), '') LIKE ? OR
+                    IFNULL(suggested_date_month, '') LIKE ? OR
+                    IFNULL(suggested_location_primary, '') LIKE ? OR
+                    IFNULL(suggested_location_city, '') LIKE ? OR
+                    IFNULL(suggested_location_state, '') LIKE ? OR
+                    IFNULL(suggested_location_landmark, '') LIKE ? OR
+                    (IFNULL(CAST(current_date_year AS TEXT), '') || '-' || 
+                     IFNULL(CAST(current_date_month AS TEXT), '') || '-' || 
+                     IFNULL(CAST(current_date_day AS TEXT), '')) LIKE ?
+                )"""
+                where_parts.append(search_conditions)
+            
+            # Combine all WHERE conditions
+            where_clause = "WHERE " + " AND ".join(where_parts)
+            
             # Construct the final query
             full_query = f"SELECT filepath FROM photos {where_clause} {order_by_clause}"
-
-            # Execute and fetch all results directly
-            results = [row[0] for row in conn.execute(full_query).fetchall()]
-            return results
+            
+            # Execute with parameters if search term provided
+            if search_term:
+                # 17 parameters for the search conditions
+                search_params = [search_pattern] * 17
+                return [row[0] for row in conn.execute(full_query, search_params).fetchall()]
+            else:
+                return [row[0] for row in conn.execute(full_query).fetchall()]
     
     def get_stats(self) -> Dict[str, int]:
         """Get statistics – single aggregate query to avoid DB lock bursts"""
@@ -4463,36 +4499,12 @@ def create_thumbnail(image_path: Path, max_size=(800, 800)) -> Optional[str]:
 def index():
     return render_template_string(UI_TEMPLATE)
 
-@app.route('/api/current')
-@app.route('/api/current/<int:index>')
-def get_current(index=None):
-    """Get current photo data - optionally for a specific index"""
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
-    
-    if not filtered_photos:
-        return jsonify({
-            'error': 'No photos in current filter',
-            'current_filter': STATE.current_filter,
-            'filtered_total': 0,
-            'stats': STATE.database.get_stats()
-        }), 404
-    
-    # Use provided index or fall back to current index
-    photo_index = index if index is not None else STATE.current_index
-    
-    # Validate index
-    if photo_index >= len(filtered_photos) or photo_index < 0:
-        return jsonify({
-            'error': 'Index out of bounds',
-            'requested_index': photo_index,
-            'filtered_total': len(filtered_photos)
-        }), 400
-    
-    # Update selected_index if an index was provided
-    if index is not None:
-        STATE.selected_index = index
-    
-    filepath = filtered_photos[photo_index]
+# ============================================================================
+# PHOTO METADATA HELPER
+# ============================================================================
+
+def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -> dict:
+    """Return the same dict structure get_current() already produces."""
     photo_path = Path(filepath)
     
     # Read from file first
@@ -4610,8 +4622,8 @@ def get_current(index=None):
         if hasattr(STATE, '_initial_load_complete'):
             for i in range(1, 3):  # Only next 2 photos, not 5
                 next_index = photo_index + i
-                if next_index < len(filtered_photos):
-                    next_filepath = filtered_photos[next_index]
+                if next_index < len(filtered):
+                    next_filepath = filtered[next_index]
                     # Only queue if not already processed or queued
                     if next_filepath not in LLM_PARSE_RESULTS:
                         # Lower priority for pre-parsing
@@ -4636,8 +4648,8 @@ def get_current(index=None):
         'filename': photo_path.name,
         'filepath': str(photo_path),
         'current_index': photo_index,
-        'selected_index': STATE.selected_index,
-        'filtered_total': len(filtered_photos),
+        'selected_index': filtered.index(STATE.selected_filepath) if STATE.selected_filepath and STATE.selected_filepath in filtered else None,
+        'filtered_total': len(filtered),
         'current_filter': STATE.current_filter,
         'image_data': create_thumbnail(photo_path),
         'stats': STATE.database.get_stats(),
@@ -4746,7 +4758,55 @@ def get_current(index=None):
     except Exception as e:
         logger.debug(f"Save status check failed: {e}")
     
-    return jsonify(response)
+    return response
+
+@app.route('/api/current')
+def get_current():
+    """Get current photo data - uses filepath from parameter or current state"""
+    # Check if filepath parameter is provided
+    filepath_param = request.args.get('filepath', '').strip()
+    search_term = request.args.get('search', '').strip()
+    
+    # Get filtered photos with search term if provided
+    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter, search_term)
+    
+    if not filtered_photos:
+        return jsonify({
+            'error': 'No photos in current filter',
+            'current_filter': STATE.current_filter,
+            'filtered_total': 0,
+            'stats': STATE.database.get_stats()
+        }), 404
+    
+    # Determine which photo to show
+    if filepath_param:
+        filepath = filepath_param
+    else:
+        # Use current filepath or default to first photo
+        filepath = STATE.current_filepath
+        if not filepath or filepath not in filtered_photos:
+            filepath = filtered_photos[0]
+            STATE.current_filepath = filepath
+    
+    # Validate filepath exists in current filter
+    if filepath not in filtered_photos:
+        return jsonify({
+            'error': 'Photo not found in current filter',
+            'filepath': filepath,
+            'current_filter': STATE.current_filter
+        }), 404
+    
+    # Update selected filepath if explicitly provided
+    if filepath_param:
+        STATE.selected_filepath = filepath
+    
+    # Calculate index for display purposes
+    photo_index = filtered_photos.index(filepath)
+    
+    payload = _build_photo_payload(filepath, filtered_photos, photo_index)
+    return jsonify(payload)
+
+# REMOVED: /api/metadata route - now handled by /api/current with filepath parameter
 
 # ============================================================================
 # LOCATION ROUTES
@@ -4934,15 +4994,24 @@ def get_suggestions(filepath):
 def save_metadata():
     """Save metadata with enhanced location support"""
     data = request.json
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filepath_param = data.get('filepath', '').strip()
+    search_term = data.get('search', '').strip()
     
-    # Use selected_index if available (grid mode), otherwise current_index
-    photo_index = STATE.selected_index if STATE.selected_index is not None else STATE.current_index
+    # Get filtered photos with search term if provided
+    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter, search_term)
     
-    if not filtered_photos or photo_index >= len(filtered_photos):
-        return jsonify({'error': 'No photo selected'}), 400
-    
-    filepath = filtered_photos[photo_index]
+    # Determine which photo to save
+    if filepath_param:
+        # Filepath provided directly
+        filepath = filepath_param
+        if filepath not in filtered_photos:
+            return jsonify({'error': 'Photo not in current filter'}), 404
+    else:
+        # Use selected filepath or current filepath
+        filepath = STATE.selected_filepath if STATE.selected_filepath else STATE.current_filepath
+        
+        if not filepath or filepath not in filtered_photos:
+            return jsonify({'error': 'No photo selected'}), 400
     photo_path = Path(filepath)
     
     # Build DateInfo from request
@@ -5069,10 +5138,21 @@ def save_metadata():
             STATE.location_manager.increment_usage(location_id)
         
         # Rest of the save logic remains the same...
-        filtered_photos_after = STATE.database.get_filtered_photos(STATE.current_filter)
-        if len(filtered_photos_after) <= STATE.current_index and STATE.current_index > 0:
-            STATE.current_index = len(filtered_photos_after) - 1
-        has_next = STATE.current_index < len(filtered_photos_after)
+        filtered_photos_after = STATE.database.get_filtered_photos(STATE.current_filter, search_term)
+        
+        # Update current filepath if the photo was removed from filter
+        if filepath not in filtered_photos_after and filtered_photos_after:
+            # Photo was removed from current filter, advance to next
+            # Find the index where the photo was before removal
+            old_index = filtered_photos.index(filepath)
+            if old_index < len(filtered_photos_after):
+                STATE.current_filepath = filtered_photos_after[old_index]
+            else:
+                STATE.current_filepath = filtered_photos_after[-1] if filtered_photos_after else None
+        
+        # Calculate if there's a next photo
+        current_index = filtered_photos_after.index(STATE.current_filepath) if STATE.current_filepath in filtered_photos_after else 0
+        has_next = current_index < len(filtered_photos_after) - 1
         
         return jsonify({
             'success': True,
@@ -5087,9 +5167,7 @@ def skip_photo():
     """Skip current photo - DEPRECATED: Kept for backwards compatibility"""
     filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
     
-    if filtered_photos and STATE.current_index < len(filtered_photos):
-        filepath = filtered_photos[STATE.current_index]
-        
+    if STATE.current_filepath and STATE.current_filepath in filtered_photos:
         # Track skip action
         with STATE.database.get_db() as conn:
             conn.execute('''
@@ -5097,12 +5175,18 @@ def skip_photo():
                 SET user_action = 'skipped',
                     user_last_action_time = CURRENT_TIMESTAMP
                 WHERE filepath = ?
-            ''', (filepath,))
-            
-            # Removed view tracking for performance
+            ''', (STATE.current_filepath,))
+        
+        # Move to next photo
+        current_index = filtered_photos.index(STATE.current_filepath)
+        if current_index + 1 < len(filtered_photos):
+            STATE.current_filepath = filtered_photos[current_index + 1]
+            has_next = True
+        else:
+            has_next = False
+    else:
+        has_next = False
     
-    STATE.current_index += 1
-    has_next = STATE.current_index < len(filtered_photos)
     return jsonify({'has_next': has_next})
 
 # ============================================================================
@@ -5111,21 +5195,69 @@ def skip_photo():
 
 @app.route('/api/navigate', methods=['POST'])
 def navigate():
-    """Navigate between photos"""
+    """Navigate between photos using filepath-based navigation"""
     data = request.json
     direction = data.get('direction', 0)
+    current_filepath = data.get('filepath', '').strip()
+    search_term = data.get('search', '').strip()
     
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    # Get filtered photos with search term if provided
+    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter, search_term)
     total = len(filtered_photos)
     
-    STATE.current_index = max(0, min(STATE.current_index + direction, total - 1))
-    STATE.selected_index = None  # Clear selection when navigating
+    if not filtered_photos:
+        return jsonify({
+            'success': False,
+            'error': 'No photos in current filter'
+        }), 404
+    
+    # Use provided filepath or fall back to state
+    if not current_filepath:
+        current_filepath = STATE.current_filepath
+    
+    # Find current photo index
+    if current_filepath and current_filepath in filtered_photos:
+        current_index = filtered_photos.index(current_filepath)
+    else:
+        # Default to first photo if current not found
+        current_index = 0
+    
+    # Calculate new index
+    new_index = max(0, min(current_index + direction, total - 1))
+    
+    # Update state with new filepath
+    STATE.current_filepath = filtered_photos[new_index]
+    STATE.selected_filepath = None  # Clear selection when navigating
     
     return jsonify({
         'success': True,
-        'current_index': STATE.current_index,
+        'current_index': new_index,
         'total': total
     })
+
+@app.route('/api/select', methods=['POST'])
+def select_photo():
+    """Set current filepath from an explicit filepath and return the payload."""
+    data = request.json
+    filepath = data.get('filepath', '').strip()
+    search = data.get('search', '').strip()
+
+    if not filepath:
+        return jsonify({'error': 'Missing filepath'}), 400
+
+    # Re-build the current filtered list, respecting an active search term
+    filtered = STATE.database.get_filtered_photos(STATE.current_filter, search)
+    if filepath not in filtered:
+        return jsonify({'error': 'Photo not in current filter'}), 404
+
+    # Update state to use this filepath
+    STATE.current_filepath = filepath
+    STATE.selected_filepath = None  # we're back in single-photo mode
+
+    # Calculate index for display
+    photo_index = filtered.index(filepath)
+    payload = _build_photo_payload(filepath, filtered, photo_index)
+    return jsonify(payload)
 
 @app.route('/api/grid/<filter_type>')
 def get_grid_photos(filter_type):
@@ -5133,8 +5265,14 @@ def get_grid_photos(filter_type):
     try:
         page = request.args.get('page', 1, type=int)
         per_page = 50  # Load 50 at a time
+        search_term = request.args.get('search', '', type=str).strip()
         
-        filtered_photos = STATE.database.get_filtered_photos(filter_type)
+        # Validate filter_type
+        valid_filters = ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete', 'all']
+        if filter_type not in valid_filters:
+            return jsonify({'error': 'Invalid filter'}), 400
+        
+        filtered_photos = STATE.database.get_filtered_photos(filter_type, search_term)
         
         # Calculate pagination
         total = len(filtered_photos)
@@ -5199,10 +5337,24 @@ def set_filter():
     data = request.json
     new_filter = data.get('filter', 'needs_both')
     
-    if new_filter in ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete']:
+    if new_filter in ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete', 'all']:
         STATE.current_filter = new_filter
-        STATE.current_index = 0
-        STATE.selected_index = None  # Clear selection when changing filters
+        
+        # Get photos in new filter
+        filtered_photos = STATE.database.get_filtered_photos(new_filter)
+        
+        # Try to keep current photo if it exists in new filter
+        if STATE.current_filepath and STATE.current_filepath in filtered_photos:
+            # Keep current photo
+            pass
+        elif filtered_photos:
+            # Default to first photo in new filter
+            STATE.current_filepath = filtered_photos[0]
+        else:
+            # No photos in filter
+            STATE.current_filepath = None
+            
+        STATE.selected_filepath = None  # Clear selection when changing filters
         return jsonify({'success': True})
     
     return jsonify({'error': 'Invalid filter'}), 400
@@ -5210,11 +5362,7 @@ def set_filter():
 @app.route('/api/unknown_date', methods=['POST'])
 def set_unknown_date():
     """Set date as unknown (system fills 1901-01-02)"""
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
-    
-    if not filtered_photos or STATE.current_index >= len(filtered_photos):
-        return jsonify({'error': 'No photo selected'}), 400
-    
+    # This route just returns the unknown date values - no state check needed
     return jsonify({
         'success': True,
         'year': '1901',
@@ -5269,7 +5417,8 @@ def set_sort():
         STATE.sort_direction = new_direction
     
     # Reset to first photo when sort changes
-    STATE.current_index = 0
+    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    STATE.current_filepath = filtered_photos[0] if filtered_photos else None
     
     return jsonify({
         'success': True,
@@ -5998,6 +6147,11 @@ def initialize_session(folder_path: str):
         print("  - POI search")
     else:
         print("\nMKLocalSearch unavailable - using CSV only")
+    
+    # Initialize current filepath to first photo in default filter
+    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    if filtered_photos:
+        STATE.current_filepath = filtered_photos[0]
 
 # ============================================================================
 # MAIN FUNCTION
