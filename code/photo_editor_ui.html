@@ -891,7 +891,7 @@ Licensed under GPL v3 - see LICENSE file for details.
 
         .sort-dropdown:focus {
             outline: none;
-            border-color: var(--source-user);
+            border-color: var(--source-filename);
         }
 
         .sort-direction-btn {
@@ -1013,7 +1013,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         <div class="photo-preview">
             <div class="photo-header">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div id="filename" style="font-size: 16px; font-weight: 500; overflow-x: auto; white-space: nowrap; width: 400px; padding-bottom: 2px;">Loading...</div>
+                    <div id="filename" style="font-size: 16px; font-weight: 500; overflow-x: auto; white-space: nowrap; width: 600px; padding-bottom: 2px;">Loading...</div>
                     <div id="file-counter" style="font-size: 14px; color: var(--text-secondary);">0 of 0</div>
                 </div>
             </div>
@@ -2678,12 +2678,20 @@ Licensed under GPL v3 - see LICENSE file for details.
                         photoFilter = 'needs_review';
                     }
                     
-                    // Sync to the photo's actual filter
+                    // Sync to the photo's actual filter but keep current photo
                     await fetch('/api/filter', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ filter: photoFilter })
+                        body: JSON.stringify({ 
+                            filter: photoFilter,
+                            keep_current: true               // ← new flag
+                        })
                     });
+                    
+                    // No reload needed – just fix counters/UI
+                    currentPhoto.current_filter = photoFilter;
+                    document.getElementById('file-counter').textContent =
+                        `${currentPhoto.current_index + 1} of ${currentPhoto.filtered_total}`;
                     
                     // Update UI to show the correct filter as active
                     document.querySelectorAll('.stat-card').forEach(card => {
@@ -2697,16 +2705,8 @@ Licensed under GPL v3 - see LICENSE file for details.
                         filterCard.classList.add('active');
                     }
                     
-                    // Reload current photo with its actual filter
-                    const params = new URLSearchParams();
-                    params.append('filepath', currentPhoto.filepath);
-                    const response = await fetch(`/api/current?${params}`);
-                    const data = await response.json();
-                    
-                    if (response.ok) {
-                        currentPhoto = data;
-                        updateUI(data);
-                    }
+                    preSearchFilter = null;
+                    isSearchActive = false;
                 } else {
                     // No current photo, just set the filter normally
                     setFilter(preSearchFilter);
@@ -2846,8 +2846,12 @@ Licensed under GPL v3 - see LICENSE file for details.
                     currentSortDirection = result.sort_direction;
                     
                     // Update UI after sort change
-                    if (gridMode) {
-                        await showGridView(currentGridFilter, 0);
+                    const photoContainer = document.querySelector('.photo-container');
+                    const isInGridView = photoContainer.classList.contains('grid-mode');
+                    
+                    if (isInGridView) {
+                        // Stay in grid view (whether from filter or search)
+                        await showGridView(currentGridFilter || 'all', 0);
                     } else {
                         await loadCurrentPhoto(); // Will use index 0 set by backend
                     }
@@ -2992,11 +2996,13 @@ Licensed under GPL v3 - see LICENSE file for details.
                     page++;
                 }
                 
-                // After ALL photos are loaded, load the first photo's metadata
-                const firstPhoto = gridContainer.querySelector('.grid-item');
-                if (firstPhoto && firstPhoto.dataset.filepath) {
-                    // Load the first photo to update the counter correctly
-                    await loadPhotoByPath(firstPhoto.dataset.filepath);
+                // After ALL photos are loaded, load the first photo's metadata only if searching
+                if (isSearchActive) {
+                    const firstPhoto = gridContainer.querySelector('.grid-item');
+                    if (firstPhoto && firstPhoto.dataset.filepath) {
+                        // Load the first photo to update the counter correctly for search results
+                        await loadPhotoByPath(firstPhoto.dataset.filepath);
+                    }
                 }
                 
                 // Scroll to current photo with 30% offset

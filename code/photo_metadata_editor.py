@@ -5336,6 +5336,7 @@ def set_filter():
     """Change filter"""
     data = request.json
     new_filter = data.get('filter', 'needs_both')
+    keep_current = data.get('keep_current', False)   # ← NEW
     
     if new_filter in ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete', 'all']:
         STATE.current_filter = new_filter
@@ -5344,16 +5345,10 @@ def set_filter():
         filtered_photos = STATE.database.get_filtered_photos(new_filter)
         
         # Try to keep current photo if it exists in new filter
-        if STATE.current_filepath and STATE.current_filepath in filtered_photos:
-            # Keep current photo
-            pass
-        elif filtered_photos:
-            # Default to first photo in new filter
-            STATE.current_filepath = filtered_photos[0]
-        else:
-            # No photos in filter
-            STATE.current_filepath = None
-            
+        if not keep_current:          # ← skip the swap when UI asks us to
+            if STATE.current_filepath not in filtered_photos:
+                STATE.current_filepath = filtered_photos[0] if filtered_photos else None
+        
         STATE.selected_filepath = None  # Clear selection when changing filters
         return jsonify({'success': True})
     
