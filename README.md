@@ -12,10 +12,10 @@ When you photograph or scan prints and negatives, the date and location informat
 
 ## Features
 
-- **Date and Location Detection** - Extracts and suggests dates and locations from filenames using custom finetuned LLM
+- **Date and Location Detection** - Suggests date and location from filename using a finetuned LLM
   - Example: `Family_Reunion_Chicago_IL_July_4_1995_0351.heic` → Chicago, IL + July 4, 1995
 - **Location Search** - Add location metadata using Apple Maps integration (cities, landmarks, addresses)
-- **Grid View** - Browse and select multiple photos with 50-per-page pagination
+- **Search and Grid View** - Browse and select multiple photos with 50-per-page pagination
 - **Mac-to-Mac Pipeline** - Transfer edited photos between Macs with automatic import to Apple Photos (optional)
 
 ## Screenshots

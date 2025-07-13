@@ -5411,9 +5411,16 @@ def set_sort():
     if new_direction and new_direction in valid_directions:
         STATE.sort_direction = new_direction
     
-    # Reset to first photo when sort changes
+    # Preserve current photo after sort
+    previous_filepath = STATE.current_filepath
     filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
-    STATE.current_filepath = filtered_photos[0] if filtered_photos else None
+    
+    # Keep the same photo selected if it exists in the filtered set
+    if previous_filepath and previous_filepath in filtered_photos:
+        STATE.current_filepath = previous_filepath
+    else:
+        # Fall back to first photo if current is not in filtered set
+        STATE.current_filepath = filtered_photos[0] if filtered_photos else None
     
     return jsonify({
         'success': True,

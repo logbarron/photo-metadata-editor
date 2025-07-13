@@ -1846,6 +1846,37 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             img.src = `data:image/jpeg;base64,${data.image_data}`;
             
+            // Add double-click handler to return to grid (universal behavior)
+            img.style.cursor = 'pointer'; // Indicate clickability
+            img.ondblclick = async () => {
+                // Always enter grid mode on double-click from single photo
+                gridMode = true;
+                
+                if (currentSearchTerm) {
+                    // If searching, return to search grid
+                    currentGridFilter = 'all';
+                    await showGridView('all', 0);
+                } else if (currentPhoto && currentPhoto.current_filter) {
+                    // If in a filter, return to that filter's grid
+                    currentGridFilter = currentPhoto.current_filter;
+                    
+                    // Update filter card visual state to show grid mode
+                    document.querySelectorAll('.stat-card').forEach(card => {
+                        card.classList.remove('active', 'grid-mode');
+                    });
+                    
+                    // Find and activate the correct filter card
+                    const filterCard = document.querySelector(`.stat-card[onclick*="${currentGridFilter}"]`);
+                    if (filterCard) {
+                        filterCard.classList.add('active', 'grid-mode');
+                    }
+                    
+                    // Show grid starting at current photo's position
+                    const currentIndex = currentPhoto.current_index || 0;
+                    await showGridView(currentGridFilter, currentIndex);
+                }
+            };
+            
             // Stats
             updateStats(data.stats);
             
@@ -2852,10 +2883,20 @@ Licensed under GPL v3 - see LICENSE file for details.
                     const isInGridView = photoContainer.classList.contains('grid-mode');
                     
                     if (isInGridView) {
-                        // Stay in grid view (whether from filter or search)
-                        await showGridView(currentGridFilter || 'all', 0);
+                        // For grid view, find the current photo's new position
+                        let startIndex = 0;
+                        if (currentPhoto && currentPhoto.filepath) {
+                            // Get the current photo's new index after sorting
+                            const indexResponse = await fetch(`/api/current?filepath=${encodeURIComponent(currentPhoto.filepath)}`);
+                            if (indexResponse.ok) {
+                                const indexData = await indexResponse.json();
+                                startIndex = indexData.current_index || 0;
+                            }
+                        }
+                        await showGridView(currentGridFilter || 'all', startIndex);
                     } else {
-                        await loadCurrentPhoto(); // Will use index 0 set by backend
+                        // Single photo view - backend preserves current photo
+                        await loadCurrentPhoto();
                     }
                 }
             } catch (error) {
