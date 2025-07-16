@@ -184,7 +184,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         .grid-item.current-photo {
             outline: 3px solid var(--source-filename);
             outline-offset: 2px;
-            animation: pulse 0.6s ease-out;
+            animation: pulseFade 0.6s ease-out;
         }
         
         /* Highlight the selected thumbnail (being edited) */
@@ -784,10 +784,10 @@ Licensed under GPL v3 - see LICENSE file for details.
         
         .btn-import.warning-state {
             background: var(--status-warning);
-            animation: pulse 2s ease-in-out infinite;
+            animation: pulseFade 2s ease-in-out infinite;
         }
         
-        @keyframes pulse {
+         {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.8; }
         }
@@ -1037,8 +1037,8 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             <!-- Quick Actions -->
             <div class="quick-actions">
-                <button class="quick-btn" onclick="setUnknownDate()">Unknown Date</button>
-                <button class="quick-btn" onclick="setUnknownLocation()">Unknown Location</button>
+                <button class="quick-btn" onclick="setUnknownDate(event)">Unknown Date</button>
+                <button class="quick-btn" onclick="setUnknownLocation(event)">Unknown Location</button>
             </div>
             
             <!-- Date Section -->
@@ -1129,6 +1129,7 @@ Licensed under GPL v3 - see LICENSE file for details.
     </div>
     
     <script>
+const statusIcon = "✅";
         // Global state
         let currentPhoto = null;
         let dateSuggestion = null;
@@ -1137,6 +1138,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         let currentGridFilter = null;
         // Selection tracking for import feature
         let selectedPhotos = new Set();
+        let gridAbortController = null; // For cancelling grid loading
         
         // LLM polling state
         let llmPollTimeout = null;
@@ -1149,8 +1151,24 @@ Licensed under GPL v3 - see LICENSE file for details.
         // Search state
         let currentSearchTerm = '';
         let searchDebounceTimer = null;
-        let isSearchActive = false;
-        let preSearchFilter = null;
+        let searchAbortController = null;  // For cancelling in-flight search requests
+        
+        // Smart search state tracking
+        let searchState = {
+            active: false,                    // Is search currently active?
+            term: '',                        // Current search term
+            preSearchContext: {              // Where user was before searching
+                filter: null,                // e.g., 'needs_review'
+                filepath: null,              // Current photo before search
+                gridMode: false,             // Were they in grid mode?
+                gridScrollPosition: 0        // Grid scroll position
+            },
+            selectedResult: {                // What user selected during search
+                filepath: null,              // Selected photo path
+                nativeFilter: null,          // Which filter it belongs to
+                fromDoubleClick: false       // How it was selected
+            }
+        };
         
         // Re-send state tracking
         let resendTimeout = null;
@@ -1163,6 +1181,54 @@ Licensed under GPL v3 - see LICENSE file for details.
         };
         let unknownDateActive = false;
         let unknownLocationActive = false;
+        
+        // Define acceptLocationSuggestion immediately to avoid race condition
+        window.acceptLocationSuggestion = async function(useAlternate = false) {
+            if (!locationSuggestion) return;
+
+            // Determine which search to use
+            let query;
+            if (useAlternate && locationSuggestion.alternate_search) {
+                query = locationSuggestion.alternate_search;
+            } else if (locationSuggestion.primary_search) {
+                query = locationSuggestion.primary_search;
+            } else {
+                // Fallback to old format if needed
+                let queryParts = [];
+                if (locationSuggestion.city) queryParts.push(locationSuggestion.city);
+                if (locationSuggestion.state) queryParts.push(locationSuggestion.state);
+                if (locationSuggestion.country && locationSuggestion.country !== '' && 
+                    locationSuggestion.country !== 'United States') {
+                    queryParts.push(locationSuggestion.country);
+                }
+                query = queryParts.join(', ');
+            }
+            
+            if (!query) return;
+
+            // Put it in the input
+            const input = document.getElementById('location-search');
+            input.value = query;
+            const clearBtn = document.getElementById('location-clear');
+            if (clearBtn) clearBtn.style.display = 'flex';
+            
+            // Add visual feedback for confidence (with safety check)
+            if (locationSuggestion.confidence !== undefined) {
+                const confidenceColor = locationSuggestion.confidence > 80 ? '#34C759' : 
+                                       locationSuggestion.confidence > 50 ? '#FF9500' : '#FF453A';
+                input.style.borderColor = confidenceColor;
+                
+                // Reset border color after a moment
+                setTimeout(() => {
+                    input.style.borderColor = '';
+                }, 3000);
+            }
+
+            // Launch search - this function will be defined later
+            if (window.searchLocations) {
+                await window.searchLocations(query);
+            }
+        };
         
         // Clear re-send state and prevent memory leaks
         function clearResendState() {
@@ -1422,6 +1488,9 @@ Licensed under GPL v3 - see LICENSE file for details.
                     hideLocationResults();
                 }
             });
+            
+            // Make searchLocations globally accessible
+            window.searchLocations = searchLocations;
         }
 
         // Handle input changes
@@ -1624,6 +1693,21 @@ Licensed under GPL v3 - see LICENSE file for details.
                 const response = await fetch(`/api/current?${params}`);
                 const data = await response.json();
                 
+                // Sync search term from backend on first load
+                if (data.search_term !== undefined && !currentSearchTerm && document.getElementById('photo-search')) {
+                    currentSearchTerm = data.search_term || '';
+                    document.getElementById('photo-search').value = currentSearchTerm;
+                    document.getElementById('photo-search-clear').style.display = currentSearchTerm ? 'block' : 'none';
+                    
+                    // If searching, dim filter cards
+                    if (currentSearchTerm) {
+                        document.querySelectorAll('.stat-card').forEach(card => {
+                            card.style.opacity = '0.5';
+                            card.style.pointerEvents = 'none';
+                        });
+                    }
+                }
+                
                 if (!response.ok) {
                     console.error('Failed to load photo:', data.error);
                     // Clear currentPhoto when filter is empty
@@ -1758,7 +1842,11 @@ Licensed under GPL v3 - see LICENSE file for details.
                     const b = document.createElement('button');
                     b.className = 'btn' + (alt ? ' alternate' : '');
                     b.textContent = text;
-                    b.onclick     = () => acceptLocationSuggestion(alt);
+                    b.onclick     = () => {
+                        if (window.acceptLocationSuggestion) {
+                            window.acceptLocationSuggestion(alt);
+                        }
+                    };
                     return b;
                 };
 
@@ -2254,50 +2342,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             updateFieldBadge('day', fieldSources.day);
         }
         
-        // Accept location suggestion - now handles primary/alternate
-        async function acceptLocationSuggestion(useAlternate = false) {
-            if (!locationSuggestion) return;
-
-            // Determine which search to use
-            let query;
-            if (useAlternate && locationSuggestion.alternate_search) {
-                query = locationSuggestion.alternate_search;
-            } else if (locationSuggestion.primary_search) {
-                query = locationSuggestion.primary_search;
-            } else {
-                // Fallback to old format if needed
-                let queryParts = [];
-                if (locationSuggestion.city) queryParts.push(locationSuggestion.city);
-                if (locationSuggestion.state) queryParts.push(locationSuggestion.state);
-                if (locationSuggestion.country && locationSuggestion.country !== '' && 
-                    locationSuggestion.country !== 'United States') {
-                    queryParts.push(locationSuggestion.country);
-                }
-                query = queryParts.join(', ');
-            }
-            
-            if (!query) return;
-
-            // Put it in the input
-            const input = document.getElementById('location-search');
-            input.value = query;
-            document.getElementById('location-clear').style.display = 'flex';
-            
-            // Add visual feedback for confidence (with safety check)
-            if (locationSuggestion.confidence !== undefined) {
-                const confidenceColor = locationSuggestion.confidence > 80 ? '#34C759' : 
-                                       locationSuggestion.confidence > 50 ? '#FF9500' : '#FF453A';
-                input.style.borderColor = confidenceColor;
-                
-                // Reset border color after a moment
-                setTimeout(() => {
-                    input.style.borderColor = '';
-                }, 3000);
-            }
-
-            // Launch search
-            await searchLocations(query);
-        }
+        // Note: acceptLocationSuggestion is now defined globally at the top of the script
         
         // Update field badge
         function updateFieldBadge(fieldId, source) {
@@ -2321,7 +2366,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         }
         
         // Set unknown date
-        async function setUnknownDate() {
+        async function setUnknownDate(e) {
             const button = event.target;
             
             if (unknownDateActive) {
@@ -2346,7 +2391,11 @@ Licensed under GPL v3 - see LICENSE file for details.
                 unknownDateActive = true;
                 
                 try {
-                    const response = await fetch('/api/unknown_date', { method: 'POST' });
+                    const response = await fetch('/api/unknown_date', { 
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ search: currentSearchTerm || '' })
+                    });
                     const data = await response.json();
                     
                     if (data.success) {
@@ -2371,7 +2420,7 @@ Licensed under GPL v3 - see LICENSE file for details.
         }
         
         // Set unknown location
-        async function setUnknownLocation() {
+        async function setUnknownLocation(e) {
             const button = event.target;
             const searchInput = document.getElementById('location-search');
             
@@ -2397,7 +2446,11 @@ Licensed under GPL v3 - see LICENSE file for details.
 
                 // Notify Flask so the change is recorded //
                 try {
-                    const resp  = await fetch('/api/unknown_location', { method: 'POST' });
+                    const resp  = await fetch('/api/unknown_location', { 
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ search: currentSearchTerm || '' })
+                    });
                     const data  = await resp.json();
                     if (data.success) {
                         // keep source badges in sync
@@ -2503,7 +2556,11 @@ Licensed under GPL v3 - see LICENSE file for details.
         async function skipPhoto() {
             // Function kept for potential future use but not used in UI
             try {
-                const response = await fetch('/api/skip', { method: 'POST' });
+                const response = await fetch('/api/skip', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ search: currentSearchTerm || '' })
+                });
                 const result = await response.json();
                 
                 if (result.has_next) {
@@ -2552,6 +2609,17 @@ Licensed under GPL v3 - see LICENSE file for details.
                 });
                 
                 if (response.ok) {
+                    const navData = await response.json();
+                    
+                    // Update search state with the photo's native filter during search
+                    if (searchState.active && currentSearchTerm && navData.native_filter) {
+                        searchState.selectedResult = {
+                            filepath: navData.filepath,
+                            nativeFilter: navData.native_filter,  // Use the photo's actual filter, not 'all'
+                            fromDoubleClick: false
+                        };
+                    }
+                    
                     loadCurrentPhoto();
                 }
                 
@@ -2590,9 +2658,10 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             // Clear button handler
             clearButton.addEventListener('click', () => {
+                // Don't clear the input yet - let clearSearch handle it
+                clearSearch();
                 searchInput.value = '';
                 clearButton.style.display = 'none';
-                clearSearch();
             });
             
             // Handle Enter key
@@ -2609,28 +2678,42 @@ Licensed under GPL v3 - see LICENSE file for details.
 
         // Perform search
         async function performSearch(searchTerm) {
+            // Capture pre-search context on first character typed
+            if (!searchState.active && searchTerm) {
+                searchState.active = true;
+                searchState.preSearchContext = {
+                    filter: currentPhoto?.current_filter || currentGridFilter || 'needs_review',
+                    filepath: currentPhoto?.filepath,
+                    gridMode: gridMode,
+                    gridScrollPosition: document.querySelector('.photo-grid')?.scrollTop || 0
+                };
+                // Reset selected result
+                searchState.selectedResult = {
+                    filepath: null,
+                    nativeFilter: null,
+                    fromDoubleClick: false
+                };
+            }
+            
             currentSearchTerm = searchTerm;
+            searchState.term = searchTerm;
+            
+            // Cancel any in-flight search request
+            if (searchAbortController) {
+                searchAbortController.abort();
+                searchAbortController = null;
+            }
             
             if (!searchTerm) {
                 clearSearch();
                 return;
             }
             
-            // Store current filter if not searching
-            if (!isSearchActive) {
-                const activeCard = document.querySelector('.stat-card.active');
-                let activeFilter = 'needs_review';
-                if (activeCard) {
-                    const onclickAttr = activeCard.getAttribute('onclick');
-                    const match = onclickAttr.match(/setFilter\('([^']+)'/);
-                    if (match) activeFilter = match[1];
-                }
-                preSearchFilter = gridMode ? currentGridFilter : activeFilter;
-            }
+            // Create new AbortController for this search
+            const controller = new AbortController();
+            searchAbortController = controller;
             
-            isSearchActive = true;
-            
-            // Visual feedback
+            // Visual feedback for search mode
             const filterCards = document.querySelectorAll('.stat-card');
             filterCards.forEach(card => {
                 card.style.opacity = '0.5';
@@ -2639,19 +2722,37 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             // Show search results in grid view
             try {
-                // Always use 'all' filter for global search
-                const searchFilter = 'all';
-                
-                // Sync the filter with the server before showing grid
-                await fetch('/api/filter', {
+                // Force global search by using 'all' filter
+                const response = await fetch('/api/set_query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filter: searchFilter })
+                    body: JSON.stringify({ 
+                        filter: 'all',           // CRITICAL: Force all filter for global search
+                        search: searchTerm,
+                        keep_current: false
+                    }),
+                    signal: controller.signal  // Use local controller to avoid race condition
                 });
-                currentGridFilter = searchFilter;
                 
-                await showGridView(searchFilter, 0);
+                if (!response.ok) {
+                    throw new Error('Search request failed');
+                }
+                
+                // Get the current filter from backend response (should be 'all')
+                const data = await response.json();
+                
+                // Always show results in 'all' filter grid
+                gridMode = true;
+                currentGridFilter = 'all';
+                await showGridView('all', 0);
             } catch (error) {
+                // Don't show error if request was aborted (user typed new search)
+                if (error.name === 'AbortError') {
+                    // Still need to cleanup on abort
+                    searchAbortController = null;
+                    return;
+                }
+                
                 console.error('Search error:', error);
                 document.getElementById('search-status').textContent = 'Search failed. Please try again.';
                 document.getElementById('search-status').style.display = 'block';
@@ -2662,89 +2763,139 @@ Licensed under GPL v3 - see LICENSE file for details.
                     card.style.opacity = '1';
                     card.style.pointerEvents = 'auto';
                 });
+                searchAbortController = null;
             }
         }
 
         // Clear search
         async function clearSearch() {
+            if (!searchState.active) return;
+            
+            // Determine where to return
+            let targetFilter, targetFilepath;
+            
+            if (searchState.selectedResult.filepath) {
+                // User selected something during search - go there
+                targetFilter = searchState.selectedResult.nativeFilter || searchState.preSearchContext.filter;
+                targetFilepath = searchState.selectedResult.filepath;
+            } else {
+                // Return to pre-search context
+                targetFilter = searchState.preSearchContext.filter;
+                targetFilepath = searchState.preSearchContext.filepath;
+            }
+            
+            // Clear UI elements
             currentSearchTerm = '';
-            isSearchActive = false;
-            
-            // Clear any selections made during search
-            selectedPhotos.clear();
-            
-            // Restore visual state
-            const filterCards = document.querySelectorAll('.stat-card');
-            filterCards.forEach(card => {
-                card.style.opacity = '1';
-                card.style.pointerEvents = 'auto';
-            });
-            
-            // Hide search status
+            document.getElementById('photo-search').value = '';
+            document.getElementById('photo-search-clear').style.display = 'none';
             document.getElementById('search-status').style.display = 'none';
             
-            // Restore previous filter or reload current view
-            if (gridMode && currentGridFilter) {
-                await showGridView(currentGridFilter, 0);
-            } else if (preSearchFilter) {
-                // If we have a current photo (single photo mode), stay on it
-                if (currentPhoto && currentPhoto.filepath) {
-                    // Determine which filter this photo belongs to
-                    let photoFilter = preSearchFilter; // default
-                    
-                    // Check the photo's status to determine its actual filter
-                    if (currentPhoto.date && currentPhoto.location) {
-                        // Has both date and location
-                        if (!currentPhoto.date.needs_fix && !currentPhoto.location.needs_fix) {
-                            photoFilter = 'complete';
-                        } else if (currentPhoto.date.needs_fix && currentPhoto.location.needs_fix) {
-                            photoFilter = 'needs_both';
-                        } else if (currentPhoto.date.needs_fix) {
-                            photoFilter = 'needs_date';
-                        } else if (currentPhoto.location.needs_fix) {
-                            photoFilter = 'needs_location';
-                        }
-                    } else if (!currentPhoto.last_saved_at) {
-                        // Not saved yet
-                        photoFilter = 'needs_review';
+            // Cancel any pending search
+            if (searchDebounceTimer) {
+                clearTimeout(searchDebounceTimer);
+                searchDebounceTimer = null;
+            }
+            
+            // Cancel any in-flight search request
+            if (searchAbortController) {
+                searchAbortController.abort();
+                searchAbortController = null;
+            }
+            
+            // Note: Keep selectedPhotos as they may have been intentionally selected
+            
+            // Re-enable filter cards
+            document.querySelectorAll('.stat-card').forEach(card => {
+                card.style.opacity = '1';
+                card.style.pointerEvents = 'auto';
+                card.classList.remove('active', 'grid-mode');
+            });
+            
+            try {
+                // Clear search on backend and set target filter
+                const response = await fetch('/api/set_query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        filter: targetFilter,
+                        search: '',
+                        keep_current: false
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to clear search');
+                }
+                
+                // Restore the mode user was in before search
+                const wasInGridMode = searchState.preSearchContext.gridMode || false;
+                
+                // Update filter card highlighting
+                const targetCard = document.querySelector(`.stat-card[onclick*="${targetFilter}"]`);
+                if (targetCard) {
+                    targetCard.classList.add('active');
+                    if (wasInGridMode) {
+                        targetCard.classList.add('grid-mode');
                     }
+                }
+                
+                // Return to the appropriate mode based on where user started
+                if (wasInGridMode) {
+                    // User was in grid mode before search - return to grid
+                    gridMode = true;
+                    currentGridFilter = targetFilter;
                     
-                    // Sync to the photo's actual filter but keep current photo
-                    await fetch('/api/filter', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            filter: photoFilter,
-                            keep_current: true               // ← new flag
-                        })
-                    });
+                    // Show the grid view
+                    await showGridView(targetFilter, 0);
                     
-                    // No reload needed – just fix counters/UI
-                    currentPhoto.current_filter = photoFilter;
-                    document.getElementById('file-counter').textContent =
-                        `${currentPhoto.current_index + 1} of ${currentPhoto.filtered_total}`;
-                    
-                    // Update UI to show the correct filter as active
-                    document.querySelectorAll('.stat-card').forEach(card => {
-                        card.classList.remove('active');
-                    });
-                    const filterCard = Array.from(document.querySelectorAll('.stat-card')).find(card => {
-                        const onclick = card.getAttribute('onclick');
-                        return onclick && onclick.includes(`'${photoFilter}'`);
-                    });
-                    if (filterCard) {
-                        filterCard.classList.add('active');
+                    // If we have a specific photo, select it in the grid
+                    if (targetFilepath) {
+                        await loadPhotoByPath(targetFilepath);
                     }
-                    
-                    preSearchFilter = null;
-                    isSearchActive = false;
                 } else {
-                    // No current photo, just set the filter normally
-                    setFilter(preSearchFilter, null, true);
+                    // User was in single image mode before search - return to single image
+                    gridMode = false;
+                    currentGridFilter = null;
+                    
+                    if (targetFilepath) {
+                        // Have specific photo - use exitGridMode to properly show it
+                        await exitGridMode(targetFilepath);
+                    } else {
+                        // No specific photo - just load current photo
+                        await loadCurrentPhoto();
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Error clearing search:', error);
+                // Still try to return to pre-search state
+                const wasInGridMode = searchState.preSearchContext.gridMode || false;
+                
+                if (wasInGridMode) {
+                    gridMode = true;
+                    currentGridFilter = targetFilter;
+                    await showGridView(targetFilter, 0);
+                    if (targetFilepath) {
+                        await loadPhotoByPath(targetFilepath);
+                    }
+                } else {
+                    gridMode = false;
+                    currentGridFilter = null;
+                    if (targetFilepath) {
+                        await exitGridMode(targetFilepath);
+                    } else {
+                        await loadCurrentPhoto();
+                    }
                 }
             }
             
-            preSearchFilter = null;
+            // Reset search state
+            searchState = {
+                active: false,
+                term: '',
+                preSearchContext: {},
+                selectedResult: {}
+            };
         }
 
         
@@ -2796,10 +2947,12 @@ Licensed under GPL v3 - see LICENSE file for details.
                 gridMode = true;
                 currentGridFilter = filter;
                 // Check if the filter has any photos first
-                const testResponse = await fetch('/api/current');
+                const params = new URLSearchParams();
+                if (currentSearchTerm) params.append('search', currentSearchTerm);
+                const testResponse = await fetch(`/api/current?${params}`);
                 const testData = await testResponse.json();
                 
-                if (!testResponse.ok || (testData.stats && testData.stats[filter.replace('_', '')] === 0)) {
+                if (!testResponse.ok || (testData.stats && testData.stats[filter] === 0)) {
                     // Show empty state instead of grid
                     const photoContainer = document.querySelector('.photo-container');
                     photoContainer.innerHTML = `
@@ -2811,6 +2964,17 @@ Licensed under GPL v3 - see LICENSE file for details.
                     gridMode = false;
                     currentGridFilter = null;
                 } else {
+                    // Make sure backend knows about the filter before showing grid
+                    await fetch('/api/filter', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            filter: filter,
+                            preserve_search: !!currentSearchTerm,
+                            search: currentSearchTerm || '',  // Include actual search term
+                            keep_current: true
+                        })
+                    });
                     await showGridView(filter, currentPhoto ? currentPhoto.current_index : 0);
                 }
             } else if (wasGridMode) {
@@ -2844,7 +3008,11 @@ Licensed under GPL v3 - see LICENSE file for details.
                     const response = await fetch('/api/filter', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ filter: filter })
+                        body: JSON.stringify({ 
+                            filter: filter,
+                            preserve_search: !!currentSearchTerm,  // Preserve search if we have one
+                            search: currentSearchTerm || ''  // Include actual search term
+                        })
                     });
                     
                     if (response.ok) {
@@ -2869,7 +3037,8 @@ Licensed under GPL v3 - see LICENSE file for details.
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
                         field: field, 
-                        direction: currentSortDirection 
+                        direction: currentSortDirection,
+                        search: currentSearchTerm  // Include current search term
                     })
                 });
                 
@@ -2887,7 +3056,10 @@ Licensed under GPL v3 - see LICENSE file for details.
                         let startIndex = 0;
                         if (currentPhoto && currentPhoto.filepath) {
                             // Get the current photo's new index after sorting
-                            const indexResponse = await fetch(`/api/current?filepath=${encodeURIComponent(currentPhoto.filepath)}`);
+                            const params = new URLSearchParams();
+                            params.append('filepath', currentPhoto.filepath);
+                            if (currentSearchTerm) params.append('search', currentSearchTerm);
+                            const indexResponse = await fetch(`/api/current?${params}`);
                             if (indexResponse.ok) {
                                 const indexData = await indexResponse.json();
                                 startIndex = indexData.current_index || 0;
@@ -2920,6 +3092,20 @@ Licensed under GPL v3 - see LICENSE file for details.
         
         // Show grid view
         async function showGridView(filter, startIndex = 0) {
+            // Cancel any in-flight grid loading
+            if (gridAbortController) {
+                gridAbortController.abort();
+                gridAbortController = null;
+            }
+            
+            // Set grid state
+            gridMode = true;
+            currentGridFilter = filter;
+            
+            // Create new AbortController for this grid load
+            const controller = new AbortController();
+            gridAbortController = controller;
+            
             const photoContainer = document.querySelector('.photo-container');
             
             // Show loading state
@@ -2951,7 +3137,9 @@ Licensed under GPL v3 - see LICENSE file for details.
                     if (currentSearchTerm) {
                         params.append('search', currentSearchTerm);
                     }
-                    const response = await fetch(`/api/grid/${filter}?${params}`);
+                    const response = await fetch(`/api/grid/${filter}?${params}`, {
+                        signal: controller.signal  // Use local controller to avoid race condition
+                    });
                     const data = await response.json();
                     
                     if (!response.ok) {
@@ -2980,18 +3168,25 @@ Licensed under GPL v3 - see LICENSE file for details.
                     
                     // Add photos to grid
                     let gridHTML = '';
-                    data.photos.forEach(photo => {
+                    if (!data.photos || data.photos.length === 0) {
+                        if (firstBatch) {
+                            gridHTML = '<div class="grid-loading">No photos found</div>';
+                        }
+                    } else {
+                        data.photos.forEach(photo => {
                         const isCurrentPhoto = photo.index === startIndex;
                         const isSelected = selectedPhotos.has(photo.filepath);
                         gridHTML += `
                             <div class="grid-item${isCurrentPhoto ? ' current-photo' : ''}${isSelected ? ' selected-photo' : ''}" 
                                  data-index="${photo.index}" 
-                                 data-filepath="${photo.filepath}">
-                                <img src="data:image/jpeg;base64,${photo.thumbnail}" alt="${photo.filename}">
+                                 data-filepath="${photo.filepath}"
+                                 data-filter-type="${photo.filter_type || ''}">
+                                <img src="data:image/jpeg;base64,${photo.thumbnail}" alt="" data-filename="${photo.filename}">
                                 <div class="grid-index">${photo.index + 1}</div>
                             </div>
                         `;
                     });
+                    }
                     
                     // Add all photos at once
                     gridContainer.insertAdjacentHTML('beforeend', gridHTML);
@@ -3040,7 +3235,7 @@ Licensed under GPL v3 - see LICENSE file for details.
                 }
                 
                 // After ALL photos are loaded, load the first photo's metadata only if searching
-                if (isSearchActive) {
+                if (currentSearchTerm) {
                     const firstPhoto = gridContainer.querySelector('.grid-item');
                     if (firstPhoto && firstPhoto.dataset.filepath) {
                         // Load the first photo to update the counter correctly for search results
@@ -3060,12 +3255,19 @@ Licensed under GPL v3 - see LICENSE file for details.
                 }
                 
             } catch (error) {
+                // Don't show error if request was aborted (user changed view)
+                if (error.name === 'AbortError') {
+                    return;
+                }
+                
                 console.error('Error loading grid:', error);
                 document.getElementById('photo-grid').innerHTML = `
                     <div class="grid-loading">
-                        <div style="color: var(--status-error);">Failed to load photos</div>
+                        <div style="color: var(--status-error);">Failed to load photos: ${error.message}</div>
                     </div>
                 `;
+            } finally {
+                gridAbortController = null;
             }
         }
         
@@ -3249,7 +3451,6 @@ Licensed under GPL v3 - see LICENSE file for details.
         // Exit grid mode
         async function exitGridMode(targetFilepath = null) {
             gridMode = false;
-            const wasSearching = isSearchActive;
             
             // Remove grid mode from cards
             document.querySelectorAll('.stat-card').forEach(card => {
@@ -3261,6 +3462,16 @@ Licensed under GPL v3 - see LICENSE file for details.
             
             // Navigate to specific photo if filepath provided
             if (targetFilepath) {
+                // If searching, track the selection
+                if (searchState.active && currentSearchTerm) {
+                    const gridItem = document.querySelector(`[data-filepath="${targetFilepath}"]`);
+                    searchState.selectedResult = {
+                        filepath: targetFilepath,
+                        nativeFilter: gridItem?.dataset.filterType || currentGridFilter,
+                        fromDoubleClick: true
+                    };
+                }
+                
                 try {
                     const res = await fetch('/api/select', {
                         method: 'POST',
@@ -3369,12 +3580,13 @@ Licensed under GPL v3 - see LICENSE file for details.
             document.getElementById('sort-field-dropdown').value = currentSortField;
             updateSortDirectionButton();
             
-            // Make function globally accessible for onclick handlers
-            window.acceptLocationSuggestion = acceptLocationSuggestion;
+            // Note: acceptLocationSuggestion is already globally accessible
             
             // Initialize search
             initializePhotoSearch();
         });
     </script>
+
+
 </body>
 </html>
