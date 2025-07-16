@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.11+-green.svg)]()
 
 <p align="left">
-  <img alt="Photo Metadata Editor" src="assets/images/pem_complete.png">
+  <img alt="Photo Metadata Editor" src="assets/images/pme_start.png">
 </p>
 
 When you photograph or scan prints and negatives, the date and location information is often incorrect. This tool updates the metadata to reflect when and where the photos were actually taken. Once corrected, photos can be transferred between Macs with an optional automated Apple Photos import.
@@ -20,10 +20,10 @@ When you photograph or scan prints and negatives, the date and location informat
 
 ## Screenshots
 
-![Start Review](assets/images/pem_start.png)
-*Initial view showing photos that need metadata review*
+![Start Review](assets/images/pme_complete.png)
+*Complete view showing photos that have corrected metadata*
 
-![Grid View](assets/images/pem_grid.png)
+![Grid View](assets/images/pme_grid.png)
 *Grid view for batch selection and management*
 
 ## Demo Video
