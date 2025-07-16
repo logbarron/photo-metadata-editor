@@ -86,6 +86,8 @@ CLAUDE.md
 !code/.env.example.txt
 !pipeline_config.example.json
 
-# Allow documentation images
+# Allow documentation images (but not .DS_Store)
 !docs/assets/images/**
 !assets/images/**
+docs/**/.DS_Store
+assets/**/.DS_Store
