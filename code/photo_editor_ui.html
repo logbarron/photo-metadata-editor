@@ -1943,7 +1943,8 @@ const statusIcon = "✅";
                 if (currentSearchTerm) {
                     // If searching, return to search grid
                     currentGridFilter = 'all';
-                    await showGridView('all', 0);
+                    const currentIndex = currentPhoto ? currentPhoto.current_index : 0;
+                    await showGridView('all', currentIndex);
                 } else if (currentPhoto && currentPhoto.current_filter) {
                     // If in a filter, return to that filter's grid
                     currentGridFilter = currentPhoto.current_filter;
@@ -3234,12 +3235,25 @@ const statusIcon = "✅";
                     page++;
                 }
                 
-                // After ALL photos are loaded, load the first photo's metadata only if searching
+                // After ALL photos are loaded, handle metadata loading for search results
                 if (currentSearchTerm) {
-                    const firstPhoto = gridContainer.querySelector('.grid-item');
-                    if (firstPhoto && firstPhoto.dataset.filepath) {
-                        // Load the first photo to update the counter correctly for search results
-                        await loadPhotoByPath(firstPhoto.dataset.filepath);
+                    // Check if current photo exists in the grid we just loaded
+                    let currentPhotoStillValid = false;
+                    if (currentPhoto && currentPhoto.filepath) {
+                        // See if this photo exists in current grid
+                        const currentPhotoElement = gridContainer.querySelector(`[data-filepath="${currentPhoto.filepath}"]`);
+                        currentPhotoStillValid = !!currentPhotoElement;
+                    }
+                    
+                    if (currentPhotoStillValid) {
+                        // Photo exists in search results - maintain selection (e.g., returning from double-click)
+                        await loadPhotoByPath(currentPhoto.filepath);
+                    } else {
+                        // New search or current photo not in results - load first photo to update counter
+                        const firstPhoto = gridContainer.querySelector('.grid-item');
+                        if (firstPhoto && firstPhoto.dataset.filepath) {
+                            await loadPhotoByPath(firstPhoto.dataset.filepath);
+                        }
                     }
                 }
                 
