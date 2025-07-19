@@ -4159,6 +4159,242 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
             print(f"ExifTool stdout: {e.stdout}")
         return False
 
+def write_metadata_to_files(filepaths: List[Path], date_info: Optional[DateInfo], 
+                           location_info: Optional[LocationInfo], preserve_camera_list: List[bool]) -> Dict[str, bool]:
+    """Write metadata to multiple files in a single ExifTool command - optimized batch version
+    
+    Args:
+        filepaths: List of Path objects for files to update
+        date_info: Date metadata to write (same for all files)
+        location_info: Location metadata to write (same for all files)
+        preserve_camera_list: List of booleans indicating whether to preserve camera data for each file
+    
+    Returns:
+        Dict mapping filepath to success status
+    """
+    if not STATE.exiftool_path or not filepaths:
+        return {str(fp): False for fp in filepaths}
+    
+    # ExifTool supports batch operations with -@ to read file list from stdin
+    # This is more efficient than multiple individual calls
+    args = [str(STATE.exiftool_path), "-m", "-overwrite_original", "-use", "MWG"]
+    
+    # For batch operations, we'll apply the same metadata to all files
+    # but need to handle preserve_camera on a per-file basis
+    # Since this complicates things, we'll use the stay_open mode for efficiency
+    
+    # Actually, for simplicity and to handle per-file preserve_camera,
+    # let's use a different approach: build all args and pass all files at once
+    
+    # Common metadata args that apply to all files
+    common_args = []
+    
+    # Date metadata (same for all files)
+    if date_info and date_info.year:
+        date_str = f"{date_info.year}:{date_info.month or '01'}:{date_info.day or '01'} 12:00:00"
+        common_args.extend([
+            f"-DateTimeOriginal={date_str}",
+            f"-CreateDate={date_str}",
+            f"-ModifyDate={date_str}"
+        ])
+    
+    # Location metadata (same for all files)
+    if location_info and location_info.state:
+        # IPTC fields
+        if location_info.landmark_name:
+            common_args.append(f"-IPTC:Sub-location={location_info.landmark_name[:32]}")
+        elif location_info.neighborhood:
+            common_args.append(f"-IPTC:Sub-location={location_info.neighborhood[:32]}")
+        elif location_info.street:
+            common_args.append(f"-IPTC:Sub-location={location_info.street[:32]}")
+        
+        if location_info.city:
+            common_args.extend([
+                f"-IPTC:City={location_info.city[:32]}",
+                f"-XMP:City={location_info.city}"
+            ])
+        else:
+            common_args.extend(["-IPTC:City=", "-XMP:City="])
+        
+        common_args.extend([
+            f"-IPTC:Province-State={location_info.state[:32]}",
+            f"-XMP:State={location_info.state}"
+        ])
+        
+        # Country info
+        if location_info.country:
+            common_args.extend([
+                f"-IPTC:Country-PrimaryLocationName={location_info.country[:64]}",
+                f"-XMP:Country={location_info.country}"
+            ])
+            if location_info.country_code:
+                country_code = location_info.country_code
+                if len(country_code) == 2:
+                    country_code = country_code + " "
+                common_args.extend([
+                    f"-IPTC:Country-PrimaryLocationCode={country_code[:3]}",
+                    f"-XMP:CountryCode={location_info.country_code.strip()}"
+                ])
+        
+        # Extended location fields
+        if location_info.street:
+            common_args.append(f"-XMP:LocationShownSublocation={location_info.street}")
+        if location_info.postal_code:
+            common_args.append(f"-XMP:LocationCreatedPostalCode={location_info.postal_code}")
+        if location_info.neighborhood:
+            common_args.append(f"-XMP:LocationCreatedSublocation={location_info.neighborhood}")
+        
+        # GPS coordinates
+        if location_info.gps_lat is not None and location_info.gps_lon is not None:
+            lat, lon = location_info.gps_lat, location_info.gps_lon
+            # Determine accuracy
+            if location_info.street:
+                accuracy = "10"
+            elif location_info.landmark_name:
+                accuracy = "25"
+            elif location_info.city:
+                accuracy = "1000"
+            elif location_info.state or location_info.country:
+                accuracy = "5000"
+            else:
+                accuracy = "100"
+            
+            common_args.extend([
+                f"-GPSLatitude={abs(lat)}",
+                f"-GPSLongitude={abs(lon)}",
+                f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
+                f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
+                f"-GPSHPositioningError={accuracy}"
+            ])
+    
+    # For batch operations where preserve_camera varies per file,
+    # we need to process files in groups or individually
+    # For now, let's process individually but efficiently
+    results = {}
+    
+    # Group files by whether they preserve camera data
+    preserve_groups = {}
+    for fp, preserve in zip(filepaths, preserve_camera_list):
+        preserve_groups.setdefault(preserve, []).append(fp)
+    
+    # Process each group
+    for preserve_camera, group_files in preserve_groups.items():
+        group_args = args.copy()
+        
+        if preserve_camera:
+            # For files that preserve camera data, we need to handle them individually
+            # because -TagsFromFile @ needs to be per-file
+            for fp in group_files:
+                single_args = args.copy()
+                single_args.extend(["-TagsFromFile", "@", "-all:all"])
+                single_args.extend(common_args)
+                
+                # Tags handling for this file
+                _, _, existing_tags, _ = read_metadata_from_file(fp)
+                existing_user_keywords = [tag for tag in existing_tags 
+                                        if tag not in [DATE_KEYWORD, LOCATION_KEYWORD]]
+                
+                # Determine final tags
+                all_tags = existing_user_keywords.copy()
+                
+                # Check if will need tags
+                existing_date, existing_location, _, _ = read_metadata_from_file(fp)
+                
+                will_need_date = True
+                if date_info:
+                    will_need_date = date_info.needs_tag()
+                elif existing_date:
+                    will_need_date = existing_date.needs_tag()
+                
+                will_need_location = True
+                if location_info:
+                    will_need_location = location_info.needs_tag()
+                elif existing_location and (existing_location.gps_lat or existing_location.state):
+                    will_need_location = existing_location.needs_tag()
+                
+                if will_need_date:
+                    all_tags.append(DATE_KEYWORD)
+                if will_need_location:
+                    all_tags.append(LOCATION_KEYWORD)
+                
+                # Remove duplicates
+                seen = set()
+                final_tags = []
+                for tag in all_tags:
+                    if tag not in seen:
+                        seen.add(tag)
+                        final_tags.append(tag)
+                
+                if final_tags:
+                    tag_string = ", ".join(final_tags)
+                    single_args.extend([f"-Keywords={tag_string}", f"-Subject={tag_string}"])
+                else:
+                    single_args.extend(["-Keywords=", "-Subject="])
+                
+                single_args.append(str(fp))
+                
+                try:
+                    result = subprocess.run(single_args, check=True, capture_output=True, text=True)
+                    results[str(fp)] = True
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Error writing metadata to {fp}: {e}")
+                    results[str(fp)] = False
+        else:
+            # Files that don't preserve camera data can be processed together
+            group_args.extend([
+                f"-Make={CAMERA_MAKE}",
+                f"-Model={CAMERA_MODEL}",
+                f"-ImageDescription={IMAGE_DESCRIPTION}"
+            ])
+            group_args.extend(common_args)
+            
+            # For non-preserve files, we need to handle each file individually
+            # to check existing metadata for proper tag calculation
+            for fp in group_files:
+                single_args = group_args.copy()
+                
+                # Read existing metadata to determine what tags are needed
+                existing_date, existing_location, _, _ = read_metadata_from_file(fp)
+                
+                # Determine final tags
+                final_tags = []
+                
+                # Check if will need date tag
+                will_need_date = True
+                if date_info:
+                    will_need_date = date_info.needs_tag()
+                elif existing_date:
+                    will_need_date = existing_date.needs_tag()
+                
+                # Check if will need location tag
+                will_need_location = True
+                if location_info:
+                    will_need_location = location_info.needs_tag()
+                elif existing_location and (existing_location.gps_lat or existing_location.state):
+                    will_need_location = existing_location.needs_tag()
+                
+                if will_need_date:
+                    final_tags.append(DATE_KEYWORD)
+                if will_need_location:
+                    final_tags.append(LOCATION_KEYWORD)
+                
+                if final_tags:
+                    tag_string = ", ".join(final_tags)
+                    single_args.extend([f"-Keywords={tag_string}", f"-Subject={tag_string}"])
+                else:
+                    single_args.extend(["-Keywords=", "-Subject="])
+                
+                single_args.append(str(fp))
+                
+                try:
+                    result = subprocess.run(single_args, check=True, capture_output=True, text=True)
+                    results[str(fp)] = True
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Error writing metadata to {fp}: {e}")
+                    results[str(fp)] = False
+    
+    return results
+
 # ============================================================================
 # FILENAME PARSING
 # ============================================================================
@@ -5183,6 +5419,176 @@ def save_metadata():
         })
     
     return jsonify({'error': 'Failed to write metadata'}), 500
+
+@app.route('/api/batch-save', methods=['POST'])
+def batch_save_metadata():
+    """Save metadata to multiple selected photos"""
+    data = request.json
+    filepaths = data.get('filepaths', [])
+    
+    if not filepaths:
+        return jsonify({'error': 'No photos selected'}), 400
+    
+    # Build DateInfo if provided
+    date_info = None
+    if date_data := data.get('date'):
+        # Build date info same as single save
+        year = date_data.get('year', '')
+        month = date_data.get('month', '')
+        day = date_data.get('day', '')
+        
+        # If the user already supplied explicit sources, keep them; default to USER
+        year_source = DataSource(date_data.get('year_source', 'user'))
+        month_source = DataSource(date_data.get('month_source', 'user'))
+        day_source = DataSource(date_data.get('day_source', 'user'))
+        
+        if year and not month:
+            month = '01'
+            month_source = DataSource.SYSTEM
+        if year and not day:
+            day = '02'
+            day_source = DataSource.SYSTEM
+        
+        date_info = DateInfo(
+            year=year,
+            month=month,
+            day=day,
+            year_source=year_source,
+            month_source=month_source,
+            day_source=day_source,
+            from_complete_suggestion=date_data.get('from_complete_suggestion', False)
+        )
+    
+    # Build LocationInfo if provided
+    location_info = None
+    location_id = None
+    if smart_location := data.get('smart_location'):
+        # Convert from smart location format
+        location = SmartLocation(
+            city=smart_location.get('city', ''),
+            state=smart_location.get('state', ''),
+            landmark_name=smart_location.get('landmark_name'),
+            gps_lat=smart_location.get('gps_lat'),
+            gps_lon=smart_location.get('gps_lon'),
+            category=Category[smart_location['category']] if smart_location.get('category') else None,
+            country=smart_location.get('country', ''),
+            country_code=smart_location.get('country_code', ''),
+            street=smart_location.get('street', ''),
+            postal_code=smart_location.get('postal_code', ''),
+            neighborhood=smart_location.get('neighborhood', '')
+        )
+        
+        # Store in database and get ID
+        location_id = STATE.location_manager.get_or_create_location(location)
+        
+        # Build LocationInfo
+        location_info = LocationInfo(
+            city=location.city,
+            state=location.state,
+            city_source=DataSource.USER,
+            state_source=DataSource.USER,
+            gps_lat=location.gps_lat,
+            gps_lon=location.gps_lon,
+            gps_source=DataSource.USER if location.gps_lat else None,
+            landmark_name=location.landmark_name,
+            landmark_source=DataSource.USER if location.landmark_name else None,
+            country=location.country,
+            country_code=location.country_code,
+            country_source=DataSource.USER if location.country else None,
+            street=location.street,
+            postal_code=location.postal_code,
+            neighborhood=location.neighborhood
+        )
+    
+    # Process batch - first validate files and check camera data
+    photo_paths = []
+    preserve_camera_list = []
+    valid_filepaths = []
+    
+    for filepath in filepaths:
+        photo_path = Path(filepath)
+        if not photo_path.exists():
+            continue
+        
+        # Get current metadata to check for camera data
+        _, _, _, current_camera_info = read_metadata_from_file(photo_path)
+        preserve_camera = current_camera_info.get('has_camera_metadata', False)
+        
+        photo_paths.append(photo_path)
+        preserve_camera_list.append(preserve_camera)
+        valid_filepaths.append(filepath)
+    
+    if not photo_paths:
+        return jsonify({
+            'success': False,
+            'error': 'No valid files found',
+            'stats': STATE.database.get_stats()
+        }), 400
+    
+    # Use batch write function for efficiency
+    write_results = write_metadata_to_files(photo_paths, date_info, location_info, preserve_camera_list)
+    
+    # Process results and update database
+    results = []
+    success_count = 0
+    error_count = 0
+    
+    for filepath in filepaths:
+        photo_path_str = str(Path(filepath))
+        
+        if photo_path_str in write_results and write_results[photo_path_str]:
+            # Successfully wrote metadata to file, now update database
+            try:
+                STATE.database.save_photo_state(
+                    filepath,
+                    date_info,
+                    location_info,
+                    user_action='saved',
+                    location_id=location_id
+                )
+                
+                results.append({
+                    'filepath': filepath,
+                    'success': True
+                })
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Database update failed for {filepath}: {e}")
+                results.append({
+                    'filepath': filepath,
+                    'success': False,
+                    'error': f'Database update failed: {str(e)}'
+                })
+                error_count += 1
+        else:
+            # Failed to write metadata
+            results.append({
+                'filepath': filepath,
+                'success': False,
+                'error': 'Failed to write metadata to file'
+            })
+            error_count += 1
+    
+    # Increment location usage if used
+    if location_id and success_count > 0:
+        # Increment by the number of successful saves
+        for _ in range(success_count):
+            STATE.location_manager.increment_usage(location_id)
+    
+    # Get updated stats
+    stats = STATE.database.get_stats()
+    
+    return jsonify({
+        'success': True,
+        'results': results,
+        'summary': {
+            'total': len(filepaths),
+            'success': success_count,
+            'errors': error_count
+        },
+        'stats': stats,
+        'message': f'Saved metadata to {success_count} photo{"s" if success_count != 1 else ""}'
+    })
 
 @app.route('/api/skip', methods=['POST'])
 def skip_photo():

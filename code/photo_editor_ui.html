@@ -1035,6 +1035,17 @@ Licensed under GPL v3 - see LICENSE file for details.
         <div class="metadata-panel">
             <h2 style="margin-bottom: 24px;">Edit Metadata</h2>
             
+            <!-- Batch Mode Indicator -->
+            <div id="batch-mode-indicator" style="display: none; background: var(--status-warning); color: white; padding: 12px; border-radius: 8px; margin-bottom: 16px; font-weight: 500;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <div id="batch-mode-text">Batch Edit Mode</div>
+                        <div style="font-size: 12px; margin-top: 4px; opacity: 0.9;">Changes will apply to all selected photos</div>
+                    </div>
+                    <button onclick="exitBatchMode()" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); color: white; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">Cancel</button>
+                </div>
+            </div>
+            
             <!-- Quick Actions -->
             <div class="quick-actions">
                 <button class="quick-btn" onclick="setUnknownDate(event)">Unknown Date</button>
@@ -1268,6 +1279,40 @@ const statusIcon = "✅";
                     sendButton.disabled = !canSend;
                 }
             }
+            
+            // Update save button text based on selection count
+            const saveButton = document.getElementById('save-btn');
+            const batchModeIndicator = document.getElementById('batch-mode-indicator');
+            const batchModeText = document.getElementById('batch-mode-text');
+            
+            // Calculate effective selections including current photo
+            let effectiveCount = selectedPhotos.size;
+            if (currentPhoto && currentPhoto.filepath && selectedPhotos.size > 0 && !selectedPhotos.has(currentPhoto.filepath)) {
+                effectiveCount++;
+            }
+            
+            if (selectedPhotos.size > 0 && effectiveCount > 1) {
+                // Batch mode
+                if (saveButton) {
+                    saveButton.textContent = `Save to ${effectiveCount} photos`;
+                    saveButton.style.background = 'var(--status-warning)';
+                }
+                if (batchModeIndicator) {
+                    batchModeIndicator.style.display = 'block';
+                    if (batchModeText) {
+                        batchModeText.textContent = `Batch Edit Mode - ${effectiveCount} photos selected`;
+                    }
+                }
+            } else {
+                // Single photo mode
+                if (saveButton) {
+                    saveButton.textContent = 'Save';
+                    saveButton.style.background = '';
+                }
+                if (batchModeIndicator) {
+                    batchModeIndicator.style.display = 'none';
+                }
+            }
         }
         
         // Removed - no longer needed without select all functionality
@@ -1281,6 +1326,11 @@ const statusIcon = "✅";
                 });
             }
             updateSelectionUI();
+        }
+        
+        // Exit batch mode by clearing selections
+        function exitBatchMode() {
+            selectNone();
         }
 
         // No longer needed - replaced by shift-click functionality
@@ -2196,6 +2246,69 @@ const statusIcon = "✅";
             document.getElementById('stat-complete').textContent = stats.complete || 0;
         }
         
+        // Show notification message
+        function showNotification(message, type = 'info') {
+            // Create notification element
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%);
+                padding: 16px 24px;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: 500;
+                z-index: 10000;
+                animation: slideDown 0.3s ease-out;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            `;
+            
+            // Set colors based on type
+            if (type === 'success') {
+                notification.style.background = 'var(--status-success)';
+                notification.style.color = 'white';
+            } else if (type === 'warning') {
+                notification.style.background = 'var(--status-warning)';
+                notification.style.color = 'white';
+            } else if (type === 'error') {
+                notification.style.background = 'var(--status-error)';
+                notification.style.color = 'white';
+            } else {
+                notification.style.background = 'var(--bg-secondary)';
+                notification.style.color = 'var(--text-primary)';
+                notification.style.border = '1px solid var(--border-color)';
+            }
+            
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            // Add animation
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes slideDown {
+                    from { 
+                        transform: translateX(-50%) translateY(-100%);
+                        opacity: 0;
+                    }
+                    to { 
+                        transform: translateX(-50%) translateY(0);
+                        opacity: 1;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+            
+            // Auto-remove after delay
+            setTimeout(() => {
+                notification.style.animation = 'slideDown 0.3s ease-out reverse';
+                setTimeout(() => {
+                    notification.remove();
+                    style.remove();
+                }, 300);
+            }, 3000);
+        }
+        
         // Update current metadata display
         function updateCurrentMetadataDisplay(data) {
             // Date
@@ -2465,6 +2578,14 @@ const statusIcon = "✅";
         
         // Save and next
         async function saveAndNext() {
+            // Check if we're in batch mode (multiple photos selected)
+            // Include current photo in batch operations if it's not already selected
+            let effectiveSelections = new Set(selectedPhotos);
+            if (currentPhoto && currentPhoto.filepath && selectedPhotos.size > 0) {
+                effectiveSelections.add(currentPhoto.filepath);
+            }
+            const isBatchMode = effectiveSelections.size > 1;
+            
             const saveData = {};
             
             // Collect date data
@@ -2484,16 +2605,16 @@ const statusIcon = "✅";
                 };
             }
             
-            // Also send current photo's camera data flag
-            if (currentPhoto && currentPhoto.has_camera_data) {
+            // Also send current photo's camera data flag (for single save)
+            if (!isBatchMode && currentPhoto && currentPhoto.has_camera_data) {
                 saveData.has_camera_data = true;
             }
             
             // Location data
             if (locationSearchState.currentLocation) {
                 saveData.smart_location = locationSearchState.currentLocation;
-            } else if (currentPhoto && currentPhoto.location && currentPhoto.location.has_gps) {
-                // Preserve existing GPS when no new location selected
+            } else if (!isBatchMode && currentPhoto && currentPhoto.location && currentPhoto.location.has_gps) {
+                // Preserve existing GPS when no new location selected (single save only)
                 saveData.preserve_gps = {
                     gps_lat: currentPhoto.location.gps_lat,
                     gps_lon: currentPhoto.location.gps_lon,
@@ -2501,55 +2622,110 @@ const statusIcon = "✅";
                 };
             }
             
+            // Disable save button during operation
+            const saveButton = document.getElementById('save-btn');
+            if (saveButton) saveButton.disabled = true;
+            
             try {
-                // Add filepath and search to save data
-                if (currentPhoto) {
-                    saveData.filepath = currentPhoto.filepath;
-                }
-                if (currentSearchTerm) {
-                    saveData.search = currentSearchTerm;
-                }
+                let response, result;
                 
-                const response = await fetch('/api/save', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(saveData)
-                });
-                
-                const result = await response.json();
-                
-                if (response.ok) {
-                    // Update local state immediately
-                    if (currentPhoto) {
-                        currentPhoto.last_saved_at = new Date().toISOString();
-                        updateSelectionUI();
-                    }
+                if (isBatchMode) {
+                    // Batch save mode - no confirm popup since UI already shows batch mode
+                    // Use batch save endpoint
+                    saveData.filepaths = Array.from(effectiveSelections);
                     
-                    if (result.has_next) {
+                    response = await fetch('/api/batch-save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(saveData)
+                    });
+                    
+                    result = await response.json();
+                    
+                    if (response.ok) {
+                        // Update stats if provided
+                        if (result.stats) {
+                            updateStats(result.stats);
+                        }
+                        
+                        // Show summary
+                        const successCount = result.summary?.success || 0;
+                        const errorCount = result.summary?.errors || 0;
+                        
+                        let message = `Saved metadata to ${successCount} photo${successCount !== 1 ? 's' : ''}`;
+                        if (errorCount > 0) {
+                            message += `\n${errorCount} error${errorCount !== 1 ? 's' : ''} occurred`;
+                        }
+                        
+                        // Show brief notification instead of alert
+                        showNotification(message, errorCount > 0 ? 'warning' : 'success');
+                        
+                        // Clear selections after batch save
+                        selectedPhotos.clear();
+                        updateSelectionUI();
+                        
+                        // Reload grid to show updated state
                         if (gridMode) {
-                            // In grid mode, reload the grid to reflect any filter/sort changes
-                            const currentIndex = currentPhoto.current_index;
+                            const currentIndex = currentPhoto ? currentPhoto.current_index : 0;
                             await showGridView(currentGridFilter, currentIndex);
-                        } else {
-                            loadCurrentPhoto();
                         }
                     } else {
-                        // Just reload to show empty state
-                        if (!gridMode) {
-                            loadCurrentPhoto();
-                        } else {
-                            // Reload grid even when no next photo
-                            const currentIndex = currentPhoto.current_index;
-                            await showGridView(currentGridFilter, currentIndex);
-                        }
+                        alert(result.error || 'Failed to save metadata to multiple photos');
                     }
+                    
                 } else {
-                    alert(result.error || 'Failed to save metadata');
+                    // Single photo save - use existing logic
+                    if (currentPhoto) {
+                        saveData.filepath = currentPhoto.filepath;
+                    }
+                    if (currentSearchTerm) {
+                        saveData.search = currentSearchTerm;
+                    }
+                    
+                    response = await fetch('/api/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(saveData)
+                    });
+                    
+                    result = await response.json();
+                    
+                    if (response.ok) {
+                        // Update local state immediately
+                        if (currentPhoto) {
+                            currentPhoto.last_saved_at = new Date().toISOString();
+                            updateSelectionUI();
+                        }
+                        
+                        if (result.has_next) {
+                            if (gridMode) {
+                                // In grid mode, reload the grid to reflect any filter/sort changes
+                                const currentIndex = currentPhoto.current_index;
+                                await showGridView(currentGridFilter, currentIndex);
+                            } else {
+                                loadCurrentPhoto();
+                            }
+                        } else {
+                            // Just reload to show empty state
+                            if (!gridMode) {
+                                loadCurrentPhoto();
+                            } else {
+                                // Reload grid even when no next photo
+                                const currentIndex = currentPhoto.current_index;
+                                await showGridView(currentGridFilter, currentIndex);
+                            }
+                        }
+                    } else {
+                        alert(result.error || 'Failed to save metadata');
+                    }
                 }
                 
             } catch (error) {
                 console.error('Error saving:', error);
                 alert('Network error - please try again');
+            } finally {
+                // Re-enable save button
+                if (saveButton) saveButton.disabled = false;
             }
         }
         
@@ -2920,6 +3096,7 @@ const statusIcon = "✅";
                 gridMode = false;
                 currentGridFilter = null;
                 selectedPhotos.clear(); // Clear all selections when exiting grid
+                updateSelectionUI();
                 // Clear the photo container
                 const photoContainer = document.querySelector('.photo-container');
                 photoContainer.innerHTML = `
@@ -2983,6 +3160,7 @@ const statusIcon = "✅";
                 gridMode = false;
                 currentGridFilter = null;
                 selectedPhotos.clear(); // Clear all selections when exiting grid
+                updateSelectionUI();
                 if (element) {
                     element.classList.add('active');
                 }
@@ -2993,6 +3171,7 @@ const statusIcon = "✅";
                 gridMode = false;
                 currentGridFilter = null;
                 selectedPhotos.clear(); // Clear selections on any filter change
+                updateSelectionUI();
                 
                 if (element) {
                     element.classList.add('active');
@@ -3212,6 +3391,8 @@ const statusIcon = "✅";
                                     selectedPhotos.add(filepath);
                                     item.classList.add('selected-photo');
                                 }
+                                // Update UI to show batch mode immediately
+                                updateSelectionUI();
                                 // Don't change the loaded photo on shift-click
                                 return;
                             }
@@ -3330,14 +3511,23 @@ const statusIcon = "✅";
             // Clear inputs first
             clearAllInputs();
             
-            // Fill date fields
-            if (data.date) {
-                setDateFields(data.date);
+            // Only fill fields if not in batch mode (multiple selections)
+            if (selectedPhotos.size <= 1) {
+                // Fill date fields
+                if (data.date) {
+                    setDateFields(data.date);
+                }
+                
+                // Suggestions
+                dateSuggestion = data.date_suggestion;
+                locationSuggestion = data.location_suggestion;
+            } else {
+                // In batch mode, keep fields empty and clear suggestions
+                dateSuggestion = null;
+                locationSuggestion = null;
+                // Update UI to reflect batch mode
+                updateSelectionUI();
             }
-            
-            // Suggestions
-            dateSuggestion = data.date_suggestion;
-            locationSuggestion = data.location_suggestion;
             
             // Check if LLM parsing is pending
             if (data.llm_status === 'pending') {
@@ -3457,8 +3647,9 @@ const statusIcon = "✅";
         
         // Update grid visual selection
         function updateGridSelection(filepath) {
+            // Only update current-photo class, preserve selected-photo for shift-click selections
             document.querySelectorAll('.grid-item').forEach(item => {
-                item.classList.toggle('selected-photo', item.dataset.filepath === filepath);
+                item.classList.toggle('current-photo', item.dataset.filepath === filepath);
             });
         }
         
@@ -3473,6 +3664,7 @@ const statusIcon = "✅";
             
             // Clear selected photos in grid mode
             selectedPhotos.clear();
+            updateSelectionUI();
             
             // Navigate to specific photo if filepath provided
             if (targetFilepath) {
