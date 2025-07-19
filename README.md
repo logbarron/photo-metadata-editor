@@ -28,9 +28,9 @@ When you photograph or scan prints and negatives, the date and location informat
 
 ## Demo Video
 
-https://github.com/user-attachments/assets/87e0f07c-d625-40f5-9a11-409930a50164
+https://github.com/user-attachments/assets/5f3354a6-ae53-47bf-9a00-7ba3fe097616
 
-*50-second demonstration of the Photo Metadata Editor in action*
+*40-second demonstration of the Photo Metadata Editor in action*
 
 ## Quick Start
 
