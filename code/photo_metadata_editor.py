@@ -1784,10 +1784,10 @@ class PhotoDatabase:
             elif STATE.sort_field == "photo_date":
                 order_by_clause = (
                     f"ORDER BY "
-                    f"CASE WHEN original_date_year IS NULL THEN 1 ELSE 0 END, "
-                    f"CAST(original_date_year AS INTEGER) {direction}, "
-                    f"CAST(original_date_month AS INTEGER) {direction}, "
-                    f"CAST(original_date_day AS INTEGER) {direction}, "
+                    f"CASE WHEN current_date_year IS NULL THEN 1 ELSE 0 END, "
+                    f"CAST(current_date_year AS INTEGER) {direction}, "
+                    f"CAST(current_date_month AS INTEGER) {direction}, "
+                    f"CAST(current_date_day AS INTEGER) {direction}, "
                     f"filename {direction}"
                 )
             elif STATE.sort_field == "date_created":
