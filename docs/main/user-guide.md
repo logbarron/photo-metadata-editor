@@ -151,8 +151,8 @@ Click any active filter again to see grid view:
 - 50 photos per page with pagination
 - Single click any thumbnail to see current metadata
 - Double click any thumbnail to jump to that photo
-- Checkboxes for selecting multiple photos
-- Green ✓ indicator on imported photos
+- Shift-click to select multiple photos for batch operations
+- Green index badges on complete photos (search mode only)
 
 ### Batch Selection (Grid View)
 
@@ -172,6 +172,30 @@ Use the **Sort** dropdown in the left panel to change ordering:
 | **Photo Date** | By date photo was taken | Oldest to newest photos |
 | **Date Created** | By file creation date | Oldest to newest files |
 | **Date Modified** | By file modification date | Oldest to newest modifications |
+
+### Photo Search
+
+The search box in the left panel lets you find photos across your entire library:
+
+**What it searches:**
+- Filename
+- Current date (year, month, day)
+- Current location (city, state, country, street, neighborhood)
+- Suggested dates and locations from filename analysis
+- Combined date strings (YYYY-MM-DD format)
+
+**How it works:**
+1. Type in the search box (minimum 2 characters)
+2. Searches across ALL photos, not just current filter
+3. Results show with their native filter type
+4. Click X button or clear search to return to normal view
+5. Search stays active while navigating between photos
+
+**Search tips:**
+- Search for years: "1995"
+- Search for locations: "Chicago" or "IL"
+- Search for events in filenames: "birthday"
+- Partial matches work: "grand" finds "Grandma" and "Grand Canyon"
 
 ### Re-sending Photos
 
@@ -226,14 +250,6 @@ If a photo has real camera metadata:
 - Original camera make/model is preserved
 - Only date and location are updated
 - Look for camera indicator in the current metadata panel
-
-### Status Tracking
-
-The tool uses keywords to track photo status:
-- **MissingDate**: Photo needs date information
-- **MissingLocation**: Photo needs location information
-
-These are removed when you provide the missing information.
 
 ### LLM Parsing Issues
 

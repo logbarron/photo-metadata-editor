@@ -37,11 +37,22 @@
 
 **Note**: Sequence numbers (_0001) are required for proper sorting and detection.
 
+## Photo Search
+
+- Search box in left panel searches entire library
+- Minimum 2 characters to search
+- Searches: filenames, dates, locations, suggestions
+- Shows results from ALL filters (not just current)
+- Clear with X button to return to filter view
+
 ## Photo Sorting
 
-- **Default**: Alphabetical by filename
-- **Sort by #**: By number at end of filename (_0001, _0002)
-- Toggle switch in left panel header
+- **Filename**: Alphabetical by filename (default)
+- **Sequence #**: By number at end of filename (_0001, _0002)
+- **Photo Date**: By when photo was taken
+- **Date Created**: By file creation date  
+- **Date Modified**: By file modification date
+- Toggle ↑↓ button changes sort direction
 
 ## Special Buttons
 
@@ -70,9 +81,7 @@ These tags are:
 
 - **Green "User" badge** - You entered this
 - **Orange "System" badge** - Tool filled this
-- **Green check** - Already imported to Photos
-- **Send icon** - Ready for import
-- **"Save First" button** - You must save before sending to Photos
+- **Green index badge** (search only) - Photo has complete metadata
 
 ## Button States
 
