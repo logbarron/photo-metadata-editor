@@ -225,6 +225,10 @@ Licensed under GPL v3 - see LICENSE file for details.
             font-weight: 600;
         }
         
+        .grid-index.complete {
+            background: rgba(52, 199, 89, 0.9);
+        }
+        
         .stat-label {
             font-size: 14px;
             color: var(--text-secondary);
@@ -3362,7 +3366,7 @@ const statusIcon = "✅";
                                  data-filepath="${photo.filepath}"
                                  data-filter-type="${photo.filter_type || ''}">
                                 <img src="data:image/jpeg;base64,${photo.thumbnail}" alt="" data-filename="${photo.filename}">
-                                <div class="grid-index">${photo.index + 1}</div>
+                                <div class="grid-index${currentSearchTerm && photo.filter_type === 'complete' ? ' complete' : ''}">${photo.index + 1}</div>
                             </div>
                         `;
                     });
