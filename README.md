@@ -10,6 +10,8 @@
 
 When you photograph or scan prints and negatives, the date and location information is often incorrect. This tool updates the metadata to reflect when and where the photos were actually taken. Once corrected, photos can be transferred between Macs with an optional automated Apple Photos import.
 
+Read the story on my personal website: [Small Software: Metadata Editor](https://loganbarron.com/posts/2025-08-28-smallsoftware-metadata/)
+
 ## Features
 
 - **Date and Location Detection** - Suggests date and location from filename using a finetuned LLM
