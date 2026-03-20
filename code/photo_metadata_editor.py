@@ -60,7 +60,7 @@ import socket
 import webbrowser
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Tuple, List, Any
+from typing import Dict, Optional, Tuple, List, Any, TypedDict
 from io import BytesIO
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -89,6 +89,8 @@ try:
     from huggingface_hub import hf_hub_download
     _LLM_AVAILABLE = True
 except ImportError:
+    Llama = None
+    hf_hub_download = None
     _LLM_AVAILABLE = False
     print("Warning: LLM parser not available - install llama-cpp-python")
 
@@ -254,7 +256,7 @@ STATE_CAPITALS = {
 }
 
 # State name to abbreviation mapping
-STATE_NAME_TO_ABBR = {
+STATE_NAME_TO_ABBR: Dict[str, str] = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
     "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
     "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
@@ -268,6 +270,12 @@ STATE_NAME_TO_ABBR = {
     "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
     "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
     "wisconsin": "WI", "wyoming": "WY", "district of columbia": "DC", "dc": "DC"
+}
+
+STATE_ABBR_TO_NAME: Dict[str, str] = {
+    abbr: name.title()
+    for name, abbr in STATE_NAME_TO_ABBR.items()
+    if len(name) > 2
 }
 
 # Countries list for location routing
@@ -392,7 +400,7 @@ class TransferError(PipelineError):
     """Error during file transfer"""
     pass
 
-class ImportError(PipelineError):
+class ImportProcessError(PipelineError):
     """Error during import process"""
     pass
 
@@ -447,7 +455,8 @@ class AppState:
         self.pipeline_ssh_connections: List[Any] = []
         self.pipeline_staging_dirs: List[Path] = []
         self.data_dir: Path = DATA_DIR
-        self.filename_parser = None 
+        self.filename_parser: Optional['FilenameParser'] = None
+        self._initial_load_complete: bool = False
         
         # Start database worker thread
         self._start_db_worker()
@@ -503,6 +512,34 @@ class AppState:
 # ============================================================================
 
 STATE = AppState()
+
+
+def require_working_dir() -> Path:
+    working_dir = STATE.working_dir
+    if working_dir is None:
+        raise RuntimeError("Working directory is not initialized")
+    return working_dir
+
+
+def require_database() -> 'PhotoDatabase':
+    database = STATE.database
+    if database is None:
+        raise RuntimeError("Database is not initialized")
+    return database
+
+
+def require_location_manager() -> 'LocationManager':
+    location_manager = STATE.location_manager
+    if location_manager is None:
+        raise RuntimeError("Location manager is not initialized")
+    return location_manager
+
+
+def require_pipeline_config() -> Dict[str, Any]:
+    pipeline_config = STATE.pipeline_config
+    if pipeline_config is None:
+        raise RuntimeError("Pipeline configuration is not initialized")
+    return pipeline_config
 
 # Register cleanup on exit
 import atexit
@@ -651,9 +688,11 @@ class DateInfo:
     
     def is_complete(self) -> bool:
         """All fields present and from user"""
-        return (self.year and self.month and self.day and
-                all(s == DataSource.USER for s in 
-                    [self.year_source, self.month_source, self.day_source]))
+        return bool(
+            self.year and self.month and self.day and
+            all(s == DataSource.USER for s in
+                [self.year_source, self.month_source, self.day_source])
+        )
     
     def needs_tag(self) -> bool:
             """Needs MissingDate tag based on smart logic"""
@@ -691,9 +730,9 @@ class LocationInfo:
     
     def is_complete(self) -> bool:
         """Has city and state from user OR has exact GPS from user"""
-        return (
+        return bool(
             (self.gps_lat is not None and self.gps_source == DataSource.USER)
-            or (self.city and self.state and 
+            or (self.city and self.state and
                 self.city_source == DataSource.USER and
                 self.state_source == DataSource.USER)
         )
@@ -727,10 +766,13 @@ class SmartLocation:
     street: str = ""
     postal_code: str = ""
     neighborhood: str = ""
+    search_label: str = ""
     
     @property
     def display_primary(self) -> str:
         """Primary display text for UI"""
+        if self.category == Category.STATE and self.search_label:
+            return self.search_label
         if self.landmark_name:
             return self.landmark_name
         elif self.street:
@@ -751,11 +793,22 @@ class SmartLocation:
                 return self.country
             else:
                 return "Unknown Location"
-    
+
     @property
     def display_secondary(self) -> str:
         """Secondary display - shows what will be saved"""
         location_parts = []
+
+        if self.category == Category.STATE and self.search_label:
+            if self.city:
+                location_parts.append(self.city)
+            elif self.state in US_STATES:
+                capital = STATE_CAPITALS.get(self.state, "")
+                if capital:
+                    location_parts.append(capital)
+            if self.state:
+                location_parts.append(self.state)
+            return f"Will save as: {', '.join(location_parts)}" if location_parts else "Unknown Location"
         
         # Handle US state-only searches
         if self.category == Category.STATE and not self.city and self.state in US_STATES:
@@ -842,6 +895,26 @@ class SmartLocation:
             'neighborhood': self.neighborhood
         }
 
+
+class DateSuggestion(TypedDict):
+    year: str
+    month: str
+    day: str
+    is_complete: bool
+
+
+class LocationSuggestion(TypedDict):
+    city: str
+    state: str
+    country: str
+    is_complete: bool
+    confidence: int
+    primary_search: str
+    alternate_search: Optional[str]
+    location_type: str
+    reasoning: str
+    landmark_name: str
+
 # ============================================================================
 # FILENAME PARSER CLASS (LLM-BASED)  
 # ============================================================================
@@ -856,7 +929,7 @@ class FilenameParser:
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(exist_ok=True)
-        self.llm = None
+        self.llm: Optional[Any] = None
         self._parse_cache = {}  # In-memory cache: filename -> parsed result
         self._max_cache_size = 1000  # Maximum cache entries
         self._llm_lock = threading.Lock()  # Thread safety for LLM calls
@@ -949,6 +1022,9 @@ Filename: {filename}
 
     def load_model(self):
         """Load the Mistral-7B Instruct v0.3 model (singleton pattern)."""
+        if not _LLM_AVAILABLE or hf_hub_download is None or Llama is None:
+            raise RuntimeError("LLM parser is not available")
+
         if self.llm is not None:
             return self.llm
 
@@ -994,6 +1070,8 @@ Filename: {filename}
         # Ensure model is loaded
         if self.llm is None:
             self.load_model()
+        assert self.llm is not None
+        json_str = "<unavailable>"
         
         try:
             # Format prompt
@@ -1058,7 +1136,7 @@ Filename: {filename}
             'search_strategy': 'need_more_info'
         }
     
-    def to_date_suggestion(self, llm_output: dict) -> Optional[Dict[str, str]]:
+    def to_date_suggestion(self, llm_output: dict) -> Optional[DateSuggestion]:
         """Convert LLM output to date suggestion format.
         
         Now handles complex format with dates under extracted.date_parts.
@@ -1107,7 +1185,7 @@ Filename: {filename}
             'is_complete': bool(month)  # Complete if has at least month
         }
     
-    def to_location_suggestion(self, llm_output: dict) -> Optional[Dict[str, str]]:
+    def to_location_suggestion(self, llm_output: dict) -> Optional[LocationSuggestion]:
         """Convert LLM output to location suggestion format.
         
         Complex approach: Use confidence and direct search queries.
@@ -1138,23 +1216,33 @@ Filename: {filename}
         primary_search = llm_output.get("primary_search")
         if not primary_search:
             return None
+        primary_search_str = str(primary_search)
+        alternate_search = llm_output.get("alternate_search")
+        if alternate_search is not None:
+            alternate_search = str(alternate_search)
         
         # Extract components for display
         extracted = llm_output.get("extracted", {})
+        landmark_name = extracted.get("landmark_name") or ""
+        city = extracted.get("city") or ""
+        state = str(extracted.get("state") or "").upper()
+        country = extracted.get("country") or ""
+        location_type = str(llm_output.get("location_type") or "unknown")
+        reasoning = str(llm_output.get("location_context") or "")
         
         return {
             # Primary fields for complex approach
             'confidence': confidence,
-            'primary_search': primary_search,
-            'alternate_search': llm_output.get("alternate_search"),
-            'location_type': llm_output.get("location_type"),
-            'reasoning': llm_output.get("location_context", ''),
+            'primary_search': primary_search_str,
+            'alternate_search': alternate_search,
+            'location_type': location_type,
+            'reasoning': reasoning,
             
             # Extracted components for display (using landmark_name to match backend)
-            'landmark_name': extracted.get("landmark_name", ''),
-            'city': extracted.get('city', ''),
-            'state': extracted.get('state', '').upper() if extracted.get('state') else '',
-            'country': extracted.get('country', ''),
+            'landmark_name': str(landmark_name),
+            'city': str(city),
+            'state': state,
+            'country': str(country),
             
             # For compatibility
             'is_complete': confidence > 70
@@ -1735,7 +1823,7 @@ class PhotoDatabase:
         with self.get_db() as conn:
             row = conn.execute('SELECT * FROM photos WHERE filepath = ?', (filepath,)).fetchone()
             if not row:
-                return None, None, False
+                return None, None
             
             # Reconstruct date from current state
             date_info = None
@@ -1771,7 +1859,7 @@ class PhotoDatabase:
             # Return photo state
             return date_info, location_info
     
-    def get_filtered_photos(self, filter_type: str, search_term: str = None) -> List[str]:
+    def get_filtered_photos(self, filter_type: str, search_term: Optional[str] = None) -> List[str]:
         """Get photos based on filter and optional search term, sorted by the database."""
         with self.get_db() as conn:
             # Build ORDER BY clause based on sort field and direction
@@ -1819,8 +1907,8 @@ class PhotoDatabase:
                 search_term = STATE.search_term
             
             # Add search condition if provided
+            search_pattern = f"%{search_term}%" if search_term else ""
             if search_term:
-                search_pattern = f"%{search_term}%"
                 search_conditions = """(
                     IFNULL(filename, '') LIKE ? OR
                     IFNULL(CAST(current_date_year AS TEXT), '') LIKE ? OR
@@ -1989,7 +2077,9 @@ class LocationManager:
                 location.country, location.country_code, location.postal_code,
                 location.neighborhood, location.category.name if location.category else 'POI'))
             
-            return cursor.lastrowid
+            row_id = cursor.lastrowid
+            assert row_id is not None
+            return row_id
     
     def increment_usage(self, location_id: int):
         with self.db.get_db() as conn:
@@ -2225,6 +2315,8 @@ def _geocode_location(query: str) -> Optional[Dict[str, Any]]:
         _cooldown()
         try:
             # Create search request
+            assert MKLocalSearchRequest is not None
+            assert MKLocalSearch is not None
             req = MKLocalSearchRequest.alloc().init()
             req.setNaturalLanguageQuery_(query)
             
@@ -2304,8 +2396,8 @@ class PhotoPipeline:
         self.db_path = self.data_dir / "photo_metadata.db"
         
         # Override staging paths to be relative to base directory
-        self.config['paths']['staging_dir'] = str(STATE.working_dir.parent / "ToSend")
-        self.config['paths']['local_reports'] = str(STATE.working_dir.parent / "reports")
+        self.config['paths']['staging_dir'] = str(self.working_dir.parent / "ToSend")
+        self.config['paths']['local_reports'] = str(self.working_dir.parent / "reports")
         
         # Track running operations for cleanup
         self._ssh_connections = []
@@ -2386,16 +2478,16 @@ class PhotoPipeline:
     
     @contextmanager
     def get_db(self):
-        """Use STATE.database instead of own connection"""
-        with STATE.database.get_db() as conn:
+        """Get database connection via injected database instance"""
+        with self.database.get_db() as conn:
             yield conn
-    
+
     def _queue_db_write(self, sql: str, params: tuple) -> Future:
         """Queue a database write operation"""
         future = Future()
-        
+
         def operation():
-            with STATE.database.get_db() as conn:
+            with self.database.get_db() as conn:
                 return conn.execute(sql, params).rowcount
         
         STATE.db_queue.put((operation, future))
@@ -2719,10 +2811,12 @@ class PhotoPipeline:
             })
             return False
     
-    def wait_for_connection(self, timeout: int = None) -> bool:
+    def wait_for_connection(self, timeout: Optional[int] = None) -> bool:
         """Wait for Mac B to be available"""
         if timeout is None:
-            timeout = self.config['mac_b']['connection_timeout']
+            default_timeout = self.config['mac_b']['connection_timeout']
+            assert isinstance(default_timeout, int)
+            timeout = default_timeout
         
         start_time = time.time()
         
@@ -2938,8 +3032,15 @@ class PhotoPipeline:
                     try:
                         remote_stat = sftp.stat(remote_path)
                         local_stat = local_path.stat()
+                        remote_size = remote_stat.st_size
                         
-                        if remote_stat.st_size == local_stat.st_size:
+                        if remote_size is None:
+                            self._emit_event({
+                                'type': 'status',
+                                'level': 'debug',
+                                'message': f'Could not determine remote size for {remote_filename}, re-uploading'
+                            })
+                        elif remote_size == local_stat.st_size:
                             self._emit_event({
                                 'type': 'status',
                                 'level': 'debug',
@@ -2951,7 +3052,7 @@ class PhotoPipeline:
                                 'original_path': file_info['src']
                             })
                             continue
-                        elif remote_stat.st_size < local_stat.st_size:
+                        elif remote_size < local_stat.st_size:
                             self._emit_event({
                                 'type': 'status',
                                 'level': 'debug',
@@ -3055,10 +3156,12 @@ class PhotoPipeline:
             })
             return False
     
-    def wait_for_manifest(self, batch_id: str, timeout: int = None) -> Optional[Dict]:
+    def wait_for_manifest(self, batch_id: str, timeout: Optional[int] = None) -> Optional[Dict]:
         """Wait for Automator to generate manifest file"""
         if timeout is None:
-            timeout = self.config['transfer']['timeout_seconds']
+            default_timeout = self.config['transfer']['timeout_seconds']
+            assert isinstance(default_timeout, int)
+            timeout = default_timeout
         
         self._emit_event({
             'type': 'status',
@@ -3172,6 +3275,7 @@ class PhotoPipeline:
     
     def update_database(self, batch_id: str, manifest: Dict):
         """Update database with import results"""
+        database = require_database()
         self._emit_event({
             'type': 'status',
             'level': 'info',
@@ -3207,7 +3311,7 @@ class PhotoPipeline:
             
             # Queue updates
             def update_photo(path=normalized_path, batch=batch_id, orig=original_path):
-                with STATE.database.get_db() as conn:
+                with database.get_db() as conn:
                     # Try normalized path first
                     result = conn.execute('''
                         UPDATE photos SET 
@@ -3261,7 +3365,7 @@ class PhotoPipeline:
         
         # Update batch status
         def update_batch_status():
-            with STATE.database.get_db() as conn:
+            with database.get_db() as conn:
                 if successful_imports == len(imported_files):
                     status = 'complete'
                     error_msg = None
@@ -3530,6 +3634,7 @@ class PhotoPipeline:
     
     def process_batch(self, batch_id: str) -> bool:
         """Process a single batch of photos"""
+        database = require_database()
         self._emit_event({
             'type': 'status',
             'level': 'info',
@@ -3557,7 +3662,7 @@ class PhotoPipeline:
             
             # Update batch status
             def update_status():
-                with STATE.database.get_db() as conn:
+                with database.get_db() as conn:
                     conn.execute('''
                         UPDATE pipeline_status 
                         SET status = 'processing',
@@ -3631,7 +3736,7 @@ class PhotoPipeline:
             manifest = self.wait_for_manifest(batch_id, timeout=actual_timeout)
             
             if manifest is None:
-                raise ImportError("Timeout waiting for import manifest")
+                raise ImportProcessError("Timeout waiting for import manifest")
             
             self._emit_event({
                 'type': 'status',
@@ -3664,7 +3769,7 @@ class PhotoPipeline:
             
             # Update batch status
             def update_failed():
-                with STATE.database.get_db() as conn:
+                with database.get_db() as conn:
                     conn.execute('''
                         UPDATE pipeline_status 
                         SET status = 'failed',
@@ -3731,14 +3836,17 @@ def run_integrated_pipeline(batch_id: str):
                 return
         
         # Validate config before creating pipeline
+        working_dir = require_working_dir()
+        pipeline_config = require_pipeline_config()
+        database = require_database()
         logger.info(f"[PIPELINE] Starting pipeline for batch {batch_id}")
-        logger.info(f"[PIPELINE] Config: {STATE.pipeline_config}")
+        logger.info(f"[PIPELINE] Config: {pipeline_config}")
         
         # Create pipeline instance
         pipeline = PhotoPipeline(
-            working_dir=STATE.working_dir,
-            config=STATE.pipeline_config,
-            database=STATE.database
+            working_dir=working_dir,
+            config=pipeline_config,
+            database=database
         )
         
         # Validate configuration
@@ -4399,7 +4507,7 @@ def write_metadata_to_files(filepaths: List[Path], date_info: Optional[DateInfo]
 # FILENAME PARSING
 # ============================================================================
 
-def extract_date_from_filename(filename: str) -> Optional[Dict[str, str]]:
+def extract_date_from_filename(filename: str) -> Optional[DateSuggestion]:
     """Extract date suggestion from filename using LLM parser.
     
     Uses Mistral-7B Instruct v0.3 model to extract structured date information.
@@ -4425,7 +4533,7 @@ def extract_date_from_filename(filename: str) -> Optional[Dict[str, str]]:
     # Fallback to regex parser
     return _extract_date_from_filename_regex(filename)
 
-def _extract_date_from_filename_regex(filename: str) -> Optional[Dict[str, str]]:
+def _extract_date_from_filename_regex(filename: str) -> Optional[DateSuggestion]:
     """Original regex-based date parser (backup)"""
     stem = Path(filename).stem
     s = re.sub(r"_[0-9]{3,4}$", "", stem, count=1)
@@ -4476,7 +4584,7 @@ def _extract_date_from_filename_regex(filename: str) -> Optional[Dict[str, str]]
     
     return None
 
-def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
+def extract_location_from_filename(filename: str) -> Optional[LocationSuggestion]:
     """Extract location suggestion from filename using LLM parser.
     
     Uses Mistral-7B Instruct v0.3 model to extract structured location information.
@@ -4502,7 +4610,7 @@ def extract_location_from_filename(filename: str) -> Optional[Dict[str, str]]:
     # Fallback to regex parser
     return _extract_location_from_filename_regex(filename)
 
-def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, str]]:
+def _extract_location_from_filename_regex(filename: str) -> Optional[LocationSuggestion]:
     """Original regex-based location parser (backup)"""
     # Remove sequence numbers from end
     s = re.sub(r"_[0-9]{3,4}$", "", Path(filename).stem)
@@ -4570,11 +4678,11 @@ def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, s
                     'is_complete': True,
                     'confidence': 85,
                     'primary_search': f"{potential_city.title()}, {potential_state.upper()}, {potential_country.title()}",
-                    'alternate_search': f"{potential_city.title()}, {potential_state.upper()}",
-                    'location_type': 'city',
-                    'reasoning': 'City, state, and country found',
-                    'venue_name': ''
-                }
+            'alternate_search': f"{potential_city.title()}, {potential_state.upper()}",
+            'location_type': 'city',
+            'reasoning': 'City, state, and country found',
+            'landmark_name': ''
+        }
         
         # Pattern: City_Country (two consecutive words where second is a country)
         if i >= 1:
@@ -4594,7 +4702,7 @@ def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, s
                         'alternate_search': potential_country.title(),
                         'location_type': 'city',
                         'reasoning': 'International city and country found',
-                        'venue_name': ''
+                        'landmark_name': ''
                     }
         
         # Pattern: City_State (US locations)
@@ -4613,7 +4721,7 @@ def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, s
                     'alternate_search': potential_state.upper(),
                     'location_type': 'city',
                     'reasoning': 'US city and state found',
-                    'venue_name': ''
+                    'landmark_name': ''
                 }
     
     # If no multi-word pattern found, look for single location identifiers
@@ -4632,7 +4740,7 @@ def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, s
                 'alternate_search': None,
                 'location_type': 'country',
                 'reasoning': 'Only country name found',
-                'venue_name': ''
+                'landmark_name': ''
             }
         
         # Just a US state
@@ -4647,7 +4755,7 @@ def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, s
                 'alternate_search': None,
                 'location_type': 'state',
                 'reasoning': 'Only US state found',
-                'venue_name': ''
+                'landmark_name': ''
             }
         
         # Full state name
@@ -4662,7 +4770,7 @@ def _extract_location_from_filename_regex(filename: str) -> Optional[Dict[str, s
                 'alternate_search': None,
                 'location_type': 'state',
                 'reasoning': 'Only US state name found',
-                'venue_name': ''
+                'landmark_name': ''
             }
     
     return None
@@ -4754,6 +4862,8 @@ def index():
 
 def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -> dict:
     """Return the same dict structure get_current() already produces."""
+    database = require_database()
+    location_manager = require_location_manager()
     photo_path = Path(filepath)
     
     # Read from file first
@@ -4764,7 +4874,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
         file_date, file_location, file_tags, file_camera_info = None, None, [], {}
     
     # Get from database
-    db_date, db_location = STATE.database.get_photo_state(filepath)
+    db_date, db_location = database.get_photo_state(filepath)
     
     # Sync: File is truth for values, DB is truth for sources
     if file_date and db_date:
@@ -4808,8 +4918,8 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
     else:
         # Check database cache before queuing
         db_cached = False
-        if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE and STATE.database:
-            with STATE.database.get_db() as conn:
+        if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE:
+            with database.get_db() as conn:
                 row = conn.execute('''
                     SELECT suggestion_filename, suggested_date_year, suggested_date_month,
                            suggested_date_day, suggested_date_complete, suggested_location_primary,
@@ -4868,7 +4978,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
     # Don't pre-queue on initial page load - only queue when navigating
     if USE_LLM_PARSER and STATE.filename_parser and _LLM_AVAILABLE:
         # Only pre-queue if this is a navigation (not initial load)
-        if hasattr(STATE, '_initial_load_complete'):
+        if STATE._initial_load_complete:
             for i in range(1, 3):  # Only next 2 photos, not 5
                 next_index = photo_index + i
                 if next_index < len(filtered):
@@ -4902,7 +5012,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
         'current_filter': STATE.current_filter,
         'search_term': STATE.search_term,
         'image_data': create_thumbnail(photo_path),
-        'stats': STATE.database.get_stats(),
+        'stats': database.get_stats(),
         'date_suggestion': date_suggestion,
         'location_suggestion': location_suggestion,
         'tags': file_tags,
@@ -4935,7 +5045,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
         }
     
     # Add camera metadata info
-    with STATE.database.get_db() as conn:
+    with database.get_db() as conn:
         camera_row = conn.execute(
             'SELECT has_camera_metadata, original_make, original_model FROM photos WHERE filepath = ?',
             (filepath,)
@@ -4951,7 +5061,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
             response['has_camera_data'] = False
 
     # Add smart location if available
-    with STATE.database.get_db() as conn:
+    with database.get_db() as conn:
         photo_row = conn.execute(
             'SELECT location_id FROM photos WHERE filepath = ?', 
             (filepath,)
@@ -4965,7 +5075,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
             
             if loc_row:
                 # Create SmartLocation object to get computed display properties
-                location_obj = STATE.location_manager._row_to_location(loc_row)
+                location_obj = location_manager._row_to_location(loc_row)
                 smart_location = {
                     'id': location_obj.id,
                     'display_primary': location_obj.display_primary,
@@ -4983,7 +5093,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
     
     # Check import status separately
     try:
-        with STATE.database.get_db() as conn:
+        with database.get_db() as conn:
             import_check = conn.execute(
                 'SELECT imported_at FROM photos WHERE filepath = ?',
                 (filepath,)
@@ -4997,7 +5107,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
     
     # Check if photo has been saved
     try:
-        with STATE.database.get_db() as conn:
+        with database.get_db() as conn:
             saved_check = conn.execute(
                 'SELECT last_saved_at FROM photos WHERE filepath = ? OR filepath = ?',
                 (filepath, str(Path(filepath).resolve()))
@@ -5013,6 +5123,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
 @app.route('/api/current')
 def get_current():
     """Get current photo data - uses filepath from parameter or current state"""
+    database = require_database()
     # Check if filepath parameter is provided
     filepath_param = request.args.get('filepath', '').strip()
     search_term = request.args.get('search', '').strip()
@@ -5022,14 +5133,14 @@ def get_current():
         STATE.set_search_term(search_term)
     
     # Get filtered photos (will use STATE.search_term if no search_term provided)
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter)
     
     if not filtered_photos:
         return jsonify({
             'error': 'No photos in current filter',
             'current_filter': STATE.current_filter,
             'filtered_total': 0,
-            'stats': STATE.database.get_stats()
+            'stats': database.get_stats()
         }), 404
     
     # Determine which photo to show
@@ -5069,13 +5180,15 @@ def get_current():
 @app.route('/api/locations/frequent')
 def get_frequent_locations():
     """Get frequently used locations"""
+    location_manager = require_location_manager()
     limit = request.args.get('limit', 10, type=int)
-    locations = STATE.location_manager.get_frequent_locations(limit)
+    locations = location_manager.get_frequent_locations(limit)
     return jsonify([loc.to_dict() for loc in locations])
 
 @app.route('/api/locations/search', methods=['POST'])
 def search_locations():
     """Unified location search with smart routing"""
+    location_manager = require_location_manager()
     query = request.json.get('query', '').strip()
     if len(query) < 2:
         return jsonify([])
@@ -5103,9 +5216,19 @@ def search_locations():
     else:
         category = Category.POI
     
-    results = []
+    results: List[SmartLocation] = []
+    state_code: Optional[str] = None
+    state_search_label: str = ""
 
-    def create_smart_location_from_result(result: Dict[str, Any], category: Category = None) -> SmartLocation:
+    if category == Category.STATE:
+        state_code = query.upper() if len(query) == 2 else STATE_NAME_TO_ABBR.get(query.lower())
+        if state_code:
+            state_search_label = state_code if len(query) == 2 else STATE_ABBR_TO_NAME[state_code]
+
+    def create_smart_location_from_result(
+        result: Dict[str, Any],
+        category: Optional[Category] = None,
+    ) -> SmartLocation:
         """Create SmartLocation from geocoding result"""
         location = SmartLocation(
             city=result.get('city', ''),
@@ -5119,7 +5242,8 @@ def search_locations():
             country_code=result.get('country_code', ''),
             street=result.get('street', ''),
             postal_code=result.get('postal_code', ''),
-            neighborhood=result.get('neighborhood', '')
+            neighborhood=result.get('neighborhood', ''),
+            search_label=state_search_label if category == Category.STATE else ''
         )
         
         return location
@@ -5129,7 +5253,6 @@ def search_locations():
     if geo_result:
         # Special handling for US state searches
         if category == Category.STATE:
-            state_code = query.upper() if len(query) == 2 else STATE_NAME_TO_ABBR.get(query.lower())
             if state_code and not geo_result.get('city'):
                 # If searching for just a state and no city returned, use capital
                 geo_result['city'] = STATE_CAPITALS.get(state_code, "")
@@ -5141,7 +5264,6 @@ def search_locations():
     
     # Fallback for US states only
     if not results and category == Category.STATE:
-        state_code = query.upper() if len(query) == 2 else STATE_NAME_TO_ABBR.get(query.lower())
         if state_code:
             capital = STATE_CAPITALS.get(state_code, "")
             if capital and STATE.gazetteer:
@@ -5154,13 +5276,12 @@ def search_locations():
                         gps_lat=lat,
                         gps_lon=lon,
                         category=Category.STATE,
-                        display_primary=query.title() if len(query) > 2 else query.upper(),
-                        display_secondary=f"Will save as: {capital}, {state_code}"
+                        search_label=state_search_label
                     ))
     
     # Also search database for previously used locations
     if not results or len(results) < 3:
-        db_results = STATE.location_manager.search_locations(query)
+        db_results = location_manager.search_locations(query)
         for loc in db_results[:3]:
             # Don't duplicate if we already have this location
             exists = any(r.city == loc.city and r.state == loc.state for r in results)
@@ -5181,6 +5302,7 @@ def search_locations():
 @app.route('/api/suggestions/<path:filepath>')
 def get_suggestions(filepath):
     """Get LLM parsing status/results for a specific photo"""
+    database = require_database()
     # Flask strips leading / from path params, so add it back for absolute paths
     if not filepath.startswith('/') and len(filepath) > 2 and filepath[1] == '/':
         # Looks like an absolute path missing its leading slash (e.g., "Users/...")
@@ -5217,7 +5339,7 @@ def get_suggestions(filepath):
         # --- Look-ahead pre-fetch: queue the next 3 photos ---------------------
         try:
             # Build the current filtered list and locate this photo's index
-            filtered_list = STATE.database.get_filtered_photos(STATE.current_filter)
+            filtered_list = database.get_filtered_photos(STATE.current_filter)
             idx = filtered_list.index(filepath)
 
             # Queue photos idx+1 .. idx+3 (if any) at lower priority (1)
@@ -5247,6 +5369,8 @@ def get_suggestions(filepath):
 @app.route('/api/save', methods=['POST'])
 def save_metadata():
     """Save metadata with enhanced location support"""
+    database = require_database()
+    location_manager = require_location_manager()
     data = request.json
     filepath_param = data.get('filepath', '').strip()
     search_term = data.get('search', '').strip()
@@ -5256,7 +5380,7 @@ def save_metadata():
         STATE.set_search_term(search_term)
     
     # Get filtered photos (will use STATE.search_term)
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter)
     
     # Determine which photo to save
     if filepath_param:
@@ -5310,7 +5434,7 @@ def save_metadata():
     location_id = None
     
     # Get current location_id from database to preserve it
-    with STATE.database.get_db() as conn:
+    with database.get_db() as conn:
         current_photo = conn.execute(
             'SELECT location_id FROM photos WHERE filepath = ?',
             (filepath,)
@@ -5344,7 +5468,7 @@ def save_metadata():
         )
         
         # Get or create location record
-        location_id = STATE.location_manager.get_or_create_location(smart_location)
+        location_id = location_manager.get_or_create_location(smart_location)
         
         # Create LocationInfo for file writing with country from search
         location_info = LocationInfo(
@@ -5375,7 +5499,7 @@ def save_metadata():
         new_file_mtime = datetime.fromtimestamp(photo_path.stat().st_mtime).isoformat()
         
         # Update hash in database
-        with STATE.database.get_db() as conn:
+        with database.get_db() as conn:
             conn.execute('''
                 UPDATE photos 
                 SET file_hash = ?, file_last_modified = ?
@@ -5383,7 +5507,7 @@ def save_metadata():
             ''', (new_file_hash, new_file_mtime, filepath))
         
         # Use save method
-        STATE.database.save_photo_state(
+        database.save_photo_state(
             filepath, 
             date_info, 
             location_info, 
@@ -5393,10 +5517,10 @@ def save_metadata():
         
         # Increment usage if location was used
         if location_id:
-            STATE.location_manager.increment_usage(location_id)
+            location_manager.increment_usage(location_id)
         
         # Rest of the save logic remains the same...
-        filtered_photos_after = STATE.database.get_filtered_photos(STATE.current_filter)
+        filtered_photos_after = database.get_filtered_photos(STATE.current_filter)
         
         # Update current filepath if the photo was removed from filter
         if filepath not in filtered_photos_after and filtered_photos_after:
@@ -5423,6 +5547,8 @@ def save_metadata():
 @app.route('/api/batch-save', methods=['POST'])
 def batch_save_metadata():
     """Save metadata to multiple selected photos"""
+    database = require_database()
+    location_manager = require_location_manager()
     data = request.json
     filepaths = data.get('filepaths', [])
     
@@ -5479,7 +5605,7 @@ def batch_save_metadata():
         )
         
         # Store in database and get ID
-        location_id = STATE.location_manager.get_or_create_location(location)
+        location_id = location_manager.get_or_create_location(location)
         
         # Build LocationInfo
         location_info = LocationInfo(
@@ -5522,7 +5648,7 @@ def batch_save_metadata():
         return jsonify({
             'success': False,
             'error': 'No valid files found',
-            'stats': STATE.database.get_stats()
+            'stats': database.get_stats()
         }), 400
     
     # Use batch write function for efficiency
@@ -5539,7 +5665,7 @@ def batch_save_metadata():
         if photo_path_str in write_results and write_results[photo_path_str]:
             # Successfully wrote metadata to file, now update database
             try:
-                STATE.database.save_photo_state(
+                database.save_photo_state(
                     filepath,
                     date_info,
                     location_info,
@@ -5573,10 +5699,10 @@ def batch_save_metadata():
     if location_id and success_count > 0:
         # Increment by the number of successful saves
         for _ in range(success_count):
-            STATE.location_manager.increment_usage(location_id)
+            location_manager.increment_usage(location_id)
     
     # Get updated stats
-    stats = STATE.database.get_stats()
+    stats = database.get_stats()
     
     return jsonify({
         'success': True,
@@ -5593,6 +5719,7 @@ def batch_save_metadata():
 @app.route('/api/skip', methods=['POST'])
 def skip_photo():
     """Skip current photo - DEPRECATED: Kept for backwards compatibility"""
+    database = require_database()
     data = request.get_json() or {}
     search_term = data.get('search', '').strip()
     
@@ -5600,11 +5727,11 @@ def skip_photo():
     if 'search' in data:
         STATE.set_search_term(search_term)
     
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter)
     
     if STATE.current_filepath and STATE.current_filepath in filtered_photos:
         # Track skip action
-        with STATE.database.get_db() as conn:
+        with database.get_db() as conn:
             conn.execute('''
                 UPDATE photos 
                 SET user_action = 'skipped',
@@ -5656,6 +5783,7 @@ def determine_photo_filter(conn, filepath):
 @app.route('/api/navigate', methods=['POST'])
 def navigate():
     """Navigate between photos using filepath-based navigation"""
+    database = require_database()
     data = request.json
     direction = data.get('direction', 0)
     current_filepath = data.get('filepath', '').strip()
@@ -5666,7 +5794,7 @@ def navigate():
         STATE.set_search_term(search_term)
     
     # Get filtered photos (will use STATE.search_term if no search_term provided)
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter)
     total = len(filtered_photos)
     
     if not filtered_photos:
@@ -5696,7 +5824,7 @@ def navigate():
     # Determine the photo's native filter (where it actually belongs)
     native_filter = None
     if STATE.search_term:  # Only needed during search
-        with STATE.database.get_db() as conn:
+        with database.get_db() as conn:
             native_filter = determine_photo_filter(conn, STATE.current_filepath)
     
     return jsonify({
@@ -5711,6 +5839,7 @@ def navigate():
 @app.route('/api/select', methods=['POST'])
 def select_photo():
     """Set current filepath from an explicit filepath and return the payload."""
+    database = require_database()
     data = request.json
     filepath = data.get('filepath', '').strip()
     search = data.get('search', '').strip()
@@ -5724,22 +5853,22 @@ def select_photo():
 
     # If searching and photo not in current filter, switch to photo's native filter
     if search and STATE.search_term:
-        filtered = STATE.database.get_filtered_photos(STATE.current_filter)
+        filtered = database.get_filtered_photos(STATE.current_filter)
         if filepath not in filtered:
             # Determine photo's native filter
-            with STATE.database.get_db() as conn:
+            with database.get_db() as conn:
                 native_filter = determine_photo_filter(conn, filepath)
             
             if native_filter:
                 # Switch to the photo's native filter
                 STATE.current_filter = native_filter
                 # Re-get filtered photos for the new filter
-                filtered = STATE.database.get_filtered_photos(STATE.current_filter)
+                filtered = database.get_filtered_photos(STATE.current_filter)
             else:
                 return jsonify({'error': 'Photo not found'}), 404
     else:
         # Normal operation - photo must be in current filter
-        filtered = STATE.database.get_filtered_photos(STATE.current_filter)
+        filtered = database.get_filtered_photos(STATE.current_filter)
         if filepath not in filtered:
             return jsonify({'error': 'Photo not in current filter'}), 404
 
@@ -5756,6 +5885,7 @@ def select_photo():
 def get_grid_photos(filter_type):
     """Get all photos for grid view - paginated for performance"""
     try:
+        database = require_database()
         page = request.args.get('page', 1, type=int)
         per_page = 50  # Load 50 at a time
         search_term = request.args.get('search', '', type=str).strip()
@@ -5770,7 +5900,7 @@ def get_grid_photos(filter_type):
             return jsonify({'error': 'Invalid filter'}), 400
         
         # Get filtered photos (will use STATE.search_term if no search_term provided)
-        filtered_photos = STATE.database.get_filtered_photos(filter_type)
+        filtered_photos = database.get_filtered_photos(filter_type)
         
         # Calculate pagination
         total = len(filtered_photos)
@@ -5792,7 +5922,7 @@ def get_grid_photos(filter_type):
         def process_photo(photo_info):
             index, filepath, photo_path = photo_info
             # Each thread gets its own connection
-            with STATE.database.get_db() as conn:
+            with database.get_db() as conn:
                 row = conn.execute(
                     'SELECT imported_at, last_saved_at, user_action, needs_date, needs_location, deleted_at FROM photos WHERE filepath = ?',
                     (filepath,)
@@ -5811,7 +5941,7 @@ def get_grid_photos(filter_type):
                 'filter_type': native_filter  # Add filter type to response
             }
 
-            STATE.database._pool.release_connection()
+            database._pool.release_connection()
             return resp
         
         # Re-use the shared pipeline executor to avoid nested pools
@@ -5836,6 +5966,7 @@ def get_grid_photos(filter_type):
 @app.route('/api/filter', methods=['POST'])
 def set_filter():
     """Change filter"""
+    database = require_database()
     data = request.json
     new_filter = data.get('filter', 'needs_both')
     keep_current = data.get('keep_current', False)   # ← NEW
@@ -5852,7 +5983,7 @@ def set_filter():
             STATE.set_search_term("")
         
         # Get photos in new filter
-        filtered_photos = STATE.database.get_filtered_photos(new_filter)
+        filtered_photos = database.get_filtered_photos(new_filter)
         
         # Try to keep current photo if it exists in new filter
         if not keep_current:          # ← skip the swap when UI asks us to
@@ -5867,6 +5998,7 @@ def set_filter():
 @app.route('/api/set_query', methods=['POST'])
 def set_query():
     """Unified endpoint to set both filter and search atomically"""
+    database = require_database()
     data = request.json
     new_filter = data.get('filter')
     search_term = data.get('search')
@@ -5884,7 +6016,7 @@ def set_query():
         STATE.set_search_term(search_term)
     
     # Get filtered photos with current filter and search
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter)
     
     # Handle current photo
     if not keep_current and filtered_photos:
@@ -5914,7 +6046,7 @@ def set_query():
         'current_filter': STATE.current_filter,
         'search_term': STATE.search_term,
         'filtered_total': len(filtered_photos),
-        'stats': STATE.database.get_stats()
+        'stats': database.get_stats()
     })
 
 @app.route('/api/unknown_date', methods=['POST'])
@@ -5961,6 +6093,7 @@ def check_city():
 @app.route('/api/set_sort', methods=['POST'])
 def set_sort():
     """Set the sort field and direction"""
+    database = require_database()
     data = request.get_json()
     new_field = data.get('field')
     new_direction = data.get('direction')
@@ -5982,7 +6115,7 @@ def set_sort():
     # Preserve current photo after sort
     previous_filepath = STATE.current_filepath
     # Use STATE.search_term to respect current search
-    filtered_photos = STATE.database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter)
     
     # Keep the same photo selected if it exists in the filtered set
     if previous_filepath and previous_filepath in filtered_photos:
@@ -6004,11 +6137,12 @@ def set_sort():
 @app.route('/api/check-import-status', methods=['POST'])
 def check_import_status():
     '''Check which photos are already imported'''
+    database = require_database()
     data = request.json
     filepaths = data.get('filepaths', [])
     
     results = []
-    with STATE.database.get_db() as conn:
+    with database.get_db() as conn:
         for filepath in filepaths:
             row = conn.execute(
                 'SELECT filepath, imported_at FROM photos WHERE filepath = ?',
@@ -6025,6 +6159,7 @@ def check_import_status():
 @app.route('/api/import-photos', methods=['POST'])
 def import_photos():
     '''Queue selected photos for import and start pipeline'''
+    database = require_database()
     data = request.json
     filepaths = data.get('filepaths', [])
     
@@ -6037,7 +6172,7 @@ def import_photos():
     batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Add to queue
-    with STATE.database.get_db() as conn:
+    with database.get_db() as conn:
         # Create batch record
         conn.execute('''
             INSERT INTO pipeline_status (batch_id, status, photo_count, started_at)
@@ -6087,6 +6222,7 @@ def import_photos():
 @app.route('/api/pipeline-status')
 def get_pipeline_status():
     '''Get current pipeline status - works with both subprocess and integrated'''
+    database = require_database()
     # Check integrated pipeline
     if STATE.pipeline_future:
         is_running = not STATE.pipeline_future.done()
@@ -6100,7 +6236,7 @@ def get_pipeline_status():
     final_status = None
     exit_code = None
     if not is_running and STATE.pipeline_batch_id:
-        with STATE.database.get_db() as conn:
+        with database.get_db() as conn:
             batch = conn.execute(
                 'SELECT status FROM pipeline_status WHERE batch_id = ?',
                 (STATE.pipeline_batch_id,)
@@ -6184,7 +6320,8 @@ def cancel_pipeline():
 def get_pipeline_batch_status(batch_id):
     '''Get detailed status for a specific batch'''
     try:
-        with STATE.database.get_db() as conn:
+        database = require_database()
+        with database.get_db() as conn:
             # Get batch info
             batch = conn.execute('''
                 SELECT ps.*,
@@ -6277,9 +6414,10 @@ def initialize_session(folder_path: str):
     # Initialize database
     db_path = DATA_DIR / "photo_metadata.db"
     STATE.database = PhotoDatabase(db_path)
+    database = require_database()
     
     # Initialize location manager
-    STATE.location_manager = LocationManager(STATE.database)
+    STATE.location_manager = LocationManager(database)
     
     # Find photos
     STATE.photos_list = sorted([
@@ -6294,7 +6432,7 @@ def initialize_session(folder_path: str):
     
     # ===== DETECT RENAMES AND HANDLE DELETIONS =====
     print("Checking for renamed or deleted files...")
-    with STATE.database.get_db() as conn:
+    with database.get_db() as conn:
         # Get all current file paths
         current_paths = {str(p): p for p in STATE.photos_list}
         
@@ -6411,7 +6549,7 @@ def initialize_session(folder_path: str):
                 file_stats = photo.stat()
                 
                 # Check if already in database
-                with STATE.database.get_db() as conn:
+                with database.get_db() as conn:
                     existing = conn.execute(
                         'SELECT * FROM photos WHERE filepath = ?', 
                         (str(photo),)
@@ -6685,8 +6823,9 @@ def initialize_session(folder_path: str):
     if USE_LLM_PARSER and _LLM_AVAILABLE:
         try:
             print("\nInitializing LLM filename parser...")
-            STATE.filename_parser = FilenameParser(cache_dir=DATA_DIR / ".llm_cache")
-            STATE.filename_parser.load_model()
+            filename_parser = FilenameParser(cache_dir=DATA_DIR / ".llm_cache")
+            filename_parser.load_model()
+            STATE.filename_parser = filename_parser
             print("LLM parser ready (parse-on-demand mode)")
             
             # Start the LLM worker thread
@@ -6828,8 +6967,8 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down...")
         # Gracefully stop background workers
-        stop_llm_worker()           # uses helper we already have:contentReference[oaicite:2]{index=2}
-        STATE.shutdown_db_worker()  # cleans up DB thread & queue:contentReference[oaicite:3]{index=3}
+        stop_llm_worker()
+        STATE.shutdown_db_worker()
 
         # Wait briefly for the HTTP server thread to finish
         if flask_thread.is_alive():

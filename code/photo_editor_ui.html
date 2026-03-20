@@ -791,7 +791,7 @@ Licensed under GPL v3 - see LICENSE file for details.
             animation: pulseFade 2s ease-in-out infinite;
         }
         
-         {
+        @keyframes pulseFade {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.8; }
         }
@@ -2485,7 +2485,7 @@ const statusIcon = "✅";
         
         // Set unknown date
         async function setUnknownDate(e) {
-            const button = event.target;
+            const button = e.target;
             
             if (unknownDateActive) {
                 // Toggle off - clear everything
@@ -2539,7 +2539,7 @@ const statusIcon = "✅";
         
         // Set unknown location
         async function setUnknownLocation(e) {
-            const button = event.target;
+            const button = e.target;
             const searchInput = document.getElementById('location-search');
             
             if (unknownLocationActive) {
