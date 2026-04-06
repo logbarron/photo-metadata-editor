@@ -4105,6 +4105,29 @@ def read_metadata_from_file(filepath: Path) -> Tuple[Optional[DateInfo], Optiona
 # METADATA WRITING
 # ============================================================================
 
+def _location_has_text_metadata(location_info: Optional[LocationInfo]) -> bool:
+    return bool(
+        location_info and (
+            location_info.landmark_name or
+            location_info.neighborhood or
+            location_info.street or
+            location_info.city or
+            location_info.state or
+            location_info.country or
+            location_info.country_code or
+            location_info.postal_code
+        )
+    )
+
+
+def _location_has_gps(location_info: Optional[LocationInfo]) -> bool:
+    return bool(
+        location_info and
+        location_info.gps_lat is not None and
+        location_info.gps_lon is not None
+    )
+
+
 def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo], 
                           location_info: Optional[LocationInfo], preserve_camera: bool = False) -> bool:
     """Write metadata to file - now with camera data preservation"""
@@ -4143,7 +4166,7 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
         ])
     
     # Location
-    if location_info and location_info.state:
+    if _location_has_text_metadata(location_info):
         # IPTC fields (with length limits for Apple Photos compatibility)
         if location_info.landmark_name:
             args.append(f"-IPTC:Sub-location={location_info.landmark_name[:32]}")
@@ -4159,8 +4182,12 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
             args.append("-IPTC:City=")
             args.append("-XMP:City=")
         
-        args.append(f"-IPTC:Province-State={location_info.state[:32]}")
-        args.append(f"-XMP:State={location_info.state}")
+        if location_info.state:
+            args.append(f"-IPTC:Province-State={location_info.state[:32]}")
+            args.append(f"-XMP:State={location_info.state}")
+        else:
+            args.append("-IPTC:Province-State=")
+            args.append("-XMP:State=")
         
         # Handle country (Apple already provides it)
         if location_info.country:
@@ -4175,6 +4202,11 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
                     country_code = country_code + " "
                 args.append(f"-IPTC:Country-PrimaryLocationCode={country_code[:3]}")
                 args.append(f"-XMP:CountryCode={country_code.strip()}")
+        else:
+            args.append("-IPTC:Country-PrimaryLocationName=")
+            args.append("-XMP:Country=")
+            args.append("-IPTC:Country-PrimaryLocationCode=")
+            args.append("-XMP:CountryCode=")
         
         # XMP extended fields (no length limits)
         if location_info.street:
@@ -4183,29 +4215,29 @@ def write_metadata_to_file(filepath: Path, date_info: Optional[DateInfo],
             args.append(f"-XMP:LocationCreatedPostalCode={location_info.postal_code}")
         if location_info.neighborhood:
             args.append(f"-XMP:LocationCreatedSublocation={location_info.neighborhood}")
-        
-        # GPS coordinates
-        if location_info.gps_lat is not None and location_info.gps_lon is not None:
-            lat, lon = location_info.gps_lat, location_info.gps_lon
-            # Determine accuracy based on what type of search this was
-            if location_info.street:
-                accuracy = "10"  # Address-level accuracy
-            elif location_info.landmark_name:
-                accuracy = "25"  # POI accuracy
-            elif location_info.city:
-                accuracy = "1000"  # City-level accuracy
-            elif location_info.state or location_info.country:
-                accuracy = "5000"  # State/Country-level accuracy
-            else:
-                accuracy = "100"  # Default accuracy
-                
-            args.extend([
-                f"-GPSLatitude={abs(lat)}",
-                f"-GPSLongitude={abs(lon)}",
-                f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
-                f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
-                f"-GPSHPositioningError={accuracy}"
-            ])
+
+    # GPS coordinates
+    if _location_has_gps(location_info):
+        lat, lon = location_info.gps_lat, location_info.gps_lon
+        # Determine accuracy based on what type of search this was
+        if location_info.street:
+            accuracy = "10"  # Address-level accuracy
+        elif location_info.landmark_name:
+            accuracy = "25"  # POI accuracy
+        elif location_info.city:
+            accuracy = "1000"  # City-level accuracy
+        elif location_info.state or location_info.country:
+            accuracy = "5000"  # State/Country-level accuracy
+        else:
+            accuracy = "100"  # Default accuracy
+            
+        args.extend([
+            f"-GPSLatitude={abs(lat)}",
+            f"-GPSLongitude={abs(lon)}",
+            f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
+            f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
+            f"-GPSHPositioningError={accuracy}"
+        ])
     
     # Tags - merge user keywords with system tags
     all_tags = existing_user_keywords.copy() if preserve_camera else []
@@ -4307,7 +4339,7 @@ def write_metadata_to_files(filepaths: List[Path], date_info: Optional[DateInfo]
         ])
     
     # Location metadata (same for all files)
-    if location_info and location_info.state:
+    if _location_has_text_metadata(location_info):
         # IPTC fields
         if location_info.landmark_name:
             common_args.append(f"-IPTC:Sub-location={location_info.landmark_name[:32]}")
@@ -4324,10 +4356,16 @@ def write_metadata_to_files(filepaths: List[Path], date_info: Optional[DateInfo]
         else:
             common_args.extend(["-IPTC:City=", "-XMP:City="])
         
-        common_args.extend([
-            f"-IPTC:Province-State={location_info.state[:32]}",
-            f"-XMP:State={location_info.state}"
-        ])
+        if location_info.state:
+            common_args.extend([
+                f"-IPTC:Province-State={location_info.state[:32]}",
+                f"-XMP:State={location_info.state}"
+            ])
+        else:
+            common_args.extend([
+                "-IPTC:Province-State=",
+                "-XMP:State="
+            ])
         
         # Country info
         if location_info.country:
@@ -4343,6 +4381,13 @@ def write_metadata_to_files(filepaths: List[Path], date_info: Optional[DateInfo]
                     f"-IPTC:Country-PrimaryLocationCode={country_code[:3]}",
                     f"-XMP:CountryCode={location_info.country_code.strip()}"
                 ])
+        else:
+            common_args.extend([
+                "-IPTC:Country-PrimaryLocationName=",
+                "-XMP:Country=",
+                "-IPTC:Country-PrimaryLocationCode=",
+                "-XMP:CountryCode="
+            ])
         
         # Extended location fields
         if location_info.street:
@@ -4351,29 +4396,28 @@ def write_metadata_to_files(filepaths: List[Path], date_info: Optional[DateInfo]
             common_args.append(f"-XMP:LocationCreatedPostalCode={location_info.postal_code}")
         if location_info.neighborhood:
             common_args.append(f"-XMP:LocationCreatedSublocation={location_info.neighborhood}")
+
+    if _location_has_gps(location_info):
+        lat, lon = location_info.gps_lat, location_info.gps_lon
+        # Determine accuracy
+        if location_info.street:
+            accuracy = "10"
+        elif location_info.landmark_name:
+            accuracy = "25"
+        elif location_info.city:
+            accuracy = "1000"
+        elif location_info.state or location_info.country:
+            accuracy = "5000"
+        else:
+            accuracy = "100"
         
-        # GPS coordinates
-        if location_info.gps_lat is not None and location_info.gps_lon is not None:
-            lat, lon = location_info.gps_lat, location_info.gps_lon
-            # Determine accuracy
-            if location_info.street:
-                accuracy = "10"
-            elif location_info.landmark_name:
-                accuracy = "25"
-            elif location_info.city:
-                accuracy = "1000"
-            elif location_info.state or location_info.country:
-                accuracy = "5000"
-            else:
-                accuracy = "100"
-            
-            common_args.extend([
-                f"-GPSLatitude={abs(lat)}",
-                f"-GPSLongitude={abs(lon)}",
-                f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
-                f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
-                f"-GPSHPositioningError={accuracy}"
-            ])
+        common_args.extend([
+            f"-GPSLatitude={abs(lat)}",
+            f"-GPSLongitude={abs(lon)}",
+            f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
+            f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
+            f"-GPSHPositioningError={accuracy}"
+        ])
     
     # For batch operations where preserve_camera varies per file,
     # we need to process files in groups or individually
@@ -4860,7 +4904,12 @@ def index():
 # PHOTO METADATA HELPER
 # ============================================================================
 
-def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -> dict:
+def _build_photo_payload(
+    filepath: str,
+    filtered: List[str],
+    photo_index: int,
+    search_term_override: Optional[str] = None,
+) -> dict:
     """Return the same dict structure get_current() already produces."""
     database = require_database()
     location_manager = require_location_manager()
@@ -5010,7 +5059,7 @@ def _build_photo_payload(filepath: str, filtered: List[str], photo_index: int) -
         'selected_index': filtered.index(STATE.selected_filepath) if STATE.selected_filepath and STATE.selected_filepath in filtered else None,
         'filtered_total': len(filtered),
         'current_filter': STATE.current_filter,
-        'search_term': STATE.search_term,
+        'search_term': STATE.search_term if search_term_override is None else search_term_override,
         'image_data': create_thumbnail(photo_path),
         'stats': database.get_stats(),
         'date_suggestion': date_suggestion,
@@ -5127,20 +5176,19 @@ def get_current():
     # Check if filepath parameter is provided
     filepath_param = request.args.get('filepath', '').strip()
     search_term = request.args.get('search', '').strip()
+    effective_search = search_term if 'search' in request.args else None
+    response_search_term = STATE.search_term if effective_search is None else effective_search
     
-    # Update STATE.search_term if provided
-    if 'search' in request.args:
-        STATE.set_search_term(search_term)
-    
-    # Get filtered photos (will use STATE.search_term if no search_term provided)
-    filtered_photos = database.get_filtered_photos(STATE.current_filter)
+    # Use the request-local search term when provided.
+    filtered_photos = database.get_filtered_photos(STATE.current_filter, effective_search)
     
     if not filtered_photos:
         return jsonify({
             'error': 'No photos in current filter',
             'current_filter': STATE.current_filter,
             'filtered_total': 0,
-            'stats': database.get_stats()
+            'stats': database.get_stats(),
+            'search_term': response_search_term,
         }), 404
     
     # Determine which photo to show
@@ -5158,7 +5206,8 @@ def get_current():
         return jsonify({
             'error': 'Photo not found in current filter',
             'filepath': filepath,
-            'current_filter': STATE.current_filter
+            'current_filter': STATE.current_filter,
+            'search_term': response_search_term,
         }), 404
     
     # Update selected filepath if explicitly provided
@@ -5168,7 +5217,7 @@ def get_current():
     # Calculate index for display purposes
     photo_index = filtered_photos.index(filepath)
     
-    payload = _build_photo_payload(filepath, filtered_photos, photo_index)
+    payload = _build_photo_payload(filepath, filtered_photos, photo_index, effective_search)
     return jsonify(payload)
 
 # REMOVED: /api/metadata route - now handled by /api/current with filepath parameter
@@ -5374,13 +5423,10 @@ def save_metadata():
     data = request.json
     filepath_param = data.get('filepath', '').strip()
     search_term = data.get('search', '').strip()
+    effective_search = search_term if 'search' in data else None
     
-    # Update STATE.search_term if provided to maintain consistency
-    if 'search' in data:
-        STATE.set_search_term(search_term)
-    
-    # Get filtered photos (will use STATE.search_term)
-    filtered_photos = database.get_filtered_photos(STATE.current_filter)
+    # Use the request-local search term when provided.
+    filtered_photos = database.get_filtered_photos(STATE.current_filter, effective_search)
     
     # Determine which photo to save
     if filepath_param:
@@ -5520,7 +5566,7 @@ def save_metadata():
             location_manager.increment_usage(location_id)
         
         # Rest of the save logic remains the same...
-        filtered_photos_after = database.get_filtered_photos(STATE.current_filter)
+        filtered_photos_after = database.get_filtered_photos(STATE.current_filter, effective_search)
         
         # Update current filepath if the photo was removed from filter
         if filepath not in filtered_photos_after and filtered_photos_after:
@@ -5722,12 +5768,9 @@ def skip_photo():
     database = require_database()
     data = request.get_json() or {}
     search_term = data.get('search', '').strip()
+    effective_search = search_term if 'search' in data else None
     
-    # Update STATE.search_term if provided
-    if 'search' in data:
-        STATE.set_search_term(search_term)
-    
-    filtered_photos = database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter, effective_search)
     
     if STATE.current_filepath and STATE.current_filepath in filtered_photos:
         # Track skip action
@@ -5788,13 +5831,10 @@ def navigate():
     direction = data.get('direction', 0)
     current_filepath = data.get('filepath', '').strip()
     search_term = data.get('search', '').strip()
+    effective_search = search_term if 'search' in data else None
     
-    # Update STATE.search_term if provided
-    if 'search' in data:
-        STATE.set_search_term(search_term)
-    
-    # Get filtered photos (will use STATE.search_term if no search_term provided)
-    filtered_photos = database.get_filtered_photos(STATE.current_filter)
+    # Use the request-local search term when provided.
+    filtered_photos = database.get_filtered_photos(STATE.current_filter, effective_search)
     total = len(filtered_photos)
     
     if not filtered_photos:
@@ -5823,7 +5863,7 @@ def navigate():
     
     # Determine the photo's native filter (where it actually belongs)
     native_filter = None
-    if STATE.search_term:  # Only needed during search
+    if effective_search:  # Only needed during search
         with database.get_db() as conn:
             native_filter = determine_photo_filter(conn, STATE.current_filepath)
     
@@ -5843,17 +5883,14 @@ def select_photo():
     data = request.json
     filepath = data.get('filepath', '').strip()
     search = data.get('search', '').strip()
+    effective_search = search if 'search' in data else None
 
     if not filepath:
         return jsonify({'error': 'Missing filepath'}), 400
 
-    # Update STATE.search_term if provided
-    if 'search' in data:
-        STATE.set_search_term(search)
-
     # If searching and photo not in current filter, switch to photo's native filter
-    if search and STATE.search_term:
-        filtered = database.get_filtered_photos(STATE.current_filter)
+    if effective_search:
+        filtered = database.get_filtered_photos(STATE.current_filter, effective_search)
         if filepath not in filtered:
             # Determine photo's native filter
             with database.get_db() as conn:
@@ -5863,7 +5900,7 @@ def select_photo():
                 # Switch to the photo's native filter
                 STATE.current_filter = native_filter
                 # Re-get filtered photos for the new filter
-                filtered = database.get_filtered_photos(STATE.current_filter)
+                filtered = database.get_filtered_photos(STATE.current_filter, effective_search)
             else:
                 return jsonify({'error': 'Photo not found'}), 404
     else:
@@ -5878,7 +5915,7 @@ def select_photo():
 
     # Calculate index for display
     photo_index = filtered.index(filepath)
-    payload = _build_photo_payload(filepath, filtered, photo_index)
+    payload = _build_photo_payload(filepath, filtered, photo_index, effective_search)
     return jsonify(payload)
 
 @app.route('/api/grid/<filter_type>')
@@ -5889,18 +5926,15 @@ def get_grid_photos(filter_type):
         page = request.args.get('page', 1, type=int)
         per_page = 50  # Load 50 at a time
         search_term = request.args.get('search', '', type=str).strip()
-        
-        # Update STATE.search_term if provided
-        if 'search' in request.args:
-            STATE.set_search_term(search_term)
+        effective_search = search_term if 'search' in request.args else None
         
         # Validate filter_type
         valid_filters = ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete', 'all']
         if filter_type not in valid_filters:
             return jsonify({'error': 'Invalid filter'}), 400
         
-        # Get filtered photos (will use STATE.search_term if no search_term provided)
-        filtered_photos = database.get_filtered_photos(filter_type)
+        # Use the request-local search term when provided.
+        filtered_photos = database.get_filtered_photos(filter_type, effective_search)
         
         # Calculate pagination
         total = len(filtered_photos)
@@ -5965,23 +5999,15 @@ def get_grid_photos(filter_type):
 
 @app.route('/api/filter', methods=['POST'])
 def set_filter():
-    """Change filter"""
+    """Change filter without mutating search state."""
     database = require_database()
     data = request.json
     new_filter = data.get('filter', 'needs_both')
     keep_current = data.get('keep_current', False)   # ← NEW
-    preserve_search = data.get('preserve_search', False)  # Whether to keep search term
-    search_term = data.get('search', '').strip()
     
     if new_filter in ['needs_review', 'needs_both', 'needs_date', 'needs_location', 'complete', 'all']:
         STATE.current_filter = new_filter
-        
-        # Update search term based on preserve_search flag
-        if preserve_search and 'search' in data:
-            STATE.set_search_term(search_term)
-        elif not preserve_search:
-            STATE.set_search_term("")
-        
+
         # Get photos in new filter
         filtered_photos = database.get_filtered_photos(new_filter)
         
@@ -6098,10 +6124,7 @@ def set_sort():
     new_field = data.get('field')
     new_direction = data.get('direction')
     search_term = data.get('search', '').strip()
-    
-    # Update STATE.search_term if provided
-    if 'search' in data:
-        STATE.set_search_term(search_term)
+    effective_search = search_term if 'search' in data else None
     
     # Validate inputs
     valid_fields = ['filename', 'sequence', 'photo_date', 'date_created', 'date_modified']
@@ -6114,8 +6137,7 @@ def set_sort():
     
     # Preserve current photo after sort
     previous_filepath = STATE.current_filepath
-    # Use STATE.search_term to respect current search
-    filtered_photos = database.get_filtered_photos(STATE.current_filter)
+    filtered_photos = database.get_filtered_photos(STATE.current_filter, effective_search)
     
     # Keep the same photo selected if it exists in the filtered set
     if previous_filepath and previous_filepath in filtered_photos:
@@ -6663,6 +6685,17 @@ def initialize_session(folder_path: str):
                         # Preserve location_id if set
                         if existing_data.get('location_id'):
                             data['location_id'] = existing_data['location_id']
+
+                        # Keep the saved location state if the file scan can't reconstruct it.
+                        if existing_data.get('user_action') == 'saved' and not location_info:
+                            data['current_gps_lat'] = existing_data.get('current_gps_lat')
+                            data['current_gps_lon'] = existing_data.get('current_gps_lon')
+                            data['current_city'] = existing_data.get('current_city')
+                            data['current_state'] = existing_data.get('current_state')
+                            data['current_location_source'] = existing_data.get('current_location_source')
+                            data['needs_location'] = existing_data.get('needs_location')
+                            data['has_good_gps'] = existing_data.get('has_good_gps')
+                            data['has_good_location'] = existing_data.get('has_good_location')
                     
                     # Insert or update
                     columns = list(data.keys())
