@@ -1159,31 +1159,37 @@ const statusIcon = "✅";
         let llmPollTimeout = null;
         let llmPollCount = 0;
         
-        // Sort state
-        let currentSortField = 'filename';
-        let currentSortDirection = 'ASC';
-        
-        // Search state
-        let currentSearchTerm = '';
-        let searchDebounceTimer = null;
-        let searchAbortController = null;  // For cancelling in-flight search requests
-        
-        // Smart search state tracking
-        let searchState = {
-            active: false,                    // Is search currently active?
-            term: '',                        // Current search term
-            preSearchContext: {              // Where user was before searching
-                filter: null,                // e.g., 'needs_review'
-                filepath: null,              // Current photo before search
-                gridMode: false,             // Were they in grid mode?
-                gridScrollPosition: 0        // Grid scroll position
-            },
-            selectedResult: {                // What user selected during search
-                filepath: null,              // Selected photo path
-                nativeFilter: null,          // Which filter it belongs to
-                fromDoubleClick: false       // How it was selected
-            }
-        };
+	        // Sort state
+	        let currentSortField = 'filename';
+	        let currentSortDirection = 'ASC';
+	        
+	        // Search state
+	        let currentSearchTerm = '';
+	        let searchDebounceTimer = null;
+	        let searchAbortController = null;  // For cancelling in-flight search requests
+	        let hasHydratedSearchFromBackend = false;
+	        let photoPayloadRequestId = 0;
+	        
+	        // Smart search state tracking
+	        function createEmptySearchState() {
+	            return {
+	                active: false,                    // Is search currently active?
+	                term: '',                        // Current search term
+	                preSearchContext: {              // Where user was before searching
+	                    filter: null,                // e.g., 'needs_review'
+	                    filepath: null,              // Current photo before search
+	                    gridMode: false,             // Were they in grid mode?
+	                    gridScrollPosition: 0        // Grid scroll position
+	                },
+	                selectedResult: {                // What user selected during search
+	                    filepath: null,              // Selected photo path
+	                    nativeFilter: null,          // Which filter it belongs to
+	                    fromDoubleClick: false       // How it was selected
+	                }
+	            };
+	        }
+	        
+	        let searchState = createEmptySearchState();
         
         // Re-send state tracking
         let resendTimeout = null;
@@ -1732,38 +1738,78 @@ const statusIcon = "✅";
             container.style.display = 'block';
         }
 
-        function hideLocationResults() {
-            document.getElementById('location-results').style.display = 'none';
-        }
-        
-        // Load current photo
-        async function loadCurrentPhoto() {
-            // Clear any pending re-send state
-            clearResendState();
-            
-            try {
-                const params = new URLSearchParams();
-                if (currentSearchTerm) params.append('search', currentSearchTerm);
-                const response = await fetch(`/api/current?${params}`);
-                const data = await response.json();
-                
-                // Sync search term from backend on first load
-                if (data.search_term !== undefined && !currentSearchTerm && document.getElementById('photo-search')) {
-                    currentSearchTerm = data.search_term || '';
-                    document.getElementById('photo-search').value = currentSearchTerm;
-                    document.getElementById('photo-search-clear').style.display = currentSearchTerm ? 'block' : 'none';
-                    
-                    // If searching, dim filter cards
-                    if (currentSearchTerm) {
-                        document.querySelectorAll('.stat-card').forEach(card => {
-                            card.style.opacity = '0.5';
-                            card.style.pointerEvents = 'none';
-                        });
-                    }
-                }
-                
-                if (!response.ok) {
-                    console.error('Failed to load photo:', data.error);
+	        function hideLocationResults() {
+	            document.getElementById('location-results').style.display = 'none';
+	        }
+	        
+	        function setSearchFilterCardState(isSearching) {
+	            document.querySelectorAll('.stat-card').forEach(card => {
+	                card.style.opacity = isSearching ? '0.5' : '1';
+	                card.style.pointerEvents = isSearching ? 'none' : 'auto';
+	            });
+	        }
+	        
+	        function syncSearchControls(searchTerm) {
+	            const searchInput = document.getElementById('photo-search');
+	            const clearButton = document.getElementById('photo-search-clear');
+	            
+	            if (searchInput) {
+	                searchInput.value = searchTerm;
+	            }
+	            
+	            if (clearButton) {
+	                clearButton.style.display = searchTerm ? 'block' : 'none';
+	            }
+	            
+	            setSearchFilterCardState(!!searchTerm);
+	        }
+	        
+	        function hydrateSearchStateFromBackend(data) {
+	            if (hasHydratedSearchFromBackend) {
+	                return;
+	            }
+	            
+	            hasHydratedSearchFromBackend = true;
+	            
+	            // Don't clobber an already-active local search with stale backend data.
+	            if (currentSearchTerm || searchState.active || data.search_term === undefined) {
+	                return;
+	            }
+	            
+	            currentSearchTerm = data.search_term || '';
+	            searchState = createEmptySearchState();
+	            searchState.active = !!currentSearchTerm;
+	            searchState.term = currentSearchTerm;
+	            searchState.preSearchContext = {
+	                filter: data.current_filter || currentGridFilter || 'needs_review',
+	                filepath: data.filepath || null,
+	                gridMode: !!gridMode,
+	                gridScrollPosition: 0
+	            };
+	            
+	            syncSearchControls(currentSearchTerm);
+	        }
+	        
+	        // Load current photo
+	        async function loadCurrentPhoto() {
+	            // Clear any pending re-send state
+	            clearResendState();
+	            
+	            try {
+	                const requestId = ++photoPayloadRequestId;
+	                const params = new URLSearchParams();
+	                if (currentSearchTerm) params.append('search', currentSearchTerm);
+	                const response = await fetch(`/api/current?${params}`);
+	                const data = await response.json();
+	                
+	                if (requestId !== photoPayloadRequestId) {
+	                    return;
+	                }
+	                
+	                hydrateSearchStateFromBackend(data);
+	                
+	                if (!response.ok) {
+	                    console.error('Failed to load photo:', data.error);
                     // Clear currentPhoto when filter is empty
                     currentPhoto = null;
                     // Handle empty filter
@@ -2822,28 +2868,26 @@ const statusIcon = "✅";
             }
             
             // Search input handler with debounce
-            searchInput.addEventListener('input', (e) => {
-                const value = e.target.value.trim();
-                clearButton.style.display = value ? 'block' : 'none';
+	            searchInput.addEventListener('input', (e) => {
+	                const value = e.target.value.trim();
+	                clearButton.style.display = value ? 'block' : 'none';
                 
                 // Clear existing timer
                 if (searchDebounceTimer) {
                     clearTimeout(searchDebounceTimer);
                 }
                 
-                // Set new timer
-                searchDebounceTimer = setTimeout(() => {
-                    performSearch(value);
-                }, 300); // 300ms debounce
-            });
-            
-            // Clear button handler
-            clearButton.addEventListener('click', () => {
-                // Don't clear the input yet - let clearSearch handle it
-                clearSearch();
-                searchInput.value = '';
-                clearButton.style.display = 'none';
-            });
+	                // Set new timer
+	                searchDebounceTimer = setTimeout(() => {
+	                    searchDebounceTimer = null;
+	                    performSearch(value);
+	                }, 300); // 300ms debounce
+	            });
+	            
+	            // Clear button handler
+	            clearButton.addEventListener('click', async () => {
+	                await clearSearch();
+	            });
             
             // Handle Enter key
             searchInput.addEventListener('keydown', (e) => {
@@ -2885,21 +2929,17 @@ const statusIcon = "✅";
                 searchAbortController = null;
             }
             
-            if (!searchTerm) {
-                clearSearch();
-                return;
-            }
+	            if (!searchTerm) {
+	                await clearSearch();
+	                return;
+	            }
             
             // Create new AbortController for this search
             const controller = new AbortController();
             searchAbortController = controller;
             
             // Visual feedback for search mode
-            const filterCards = document.querySelectorAll('.stat-card');
-            filterCards.forEach(card => {
-                card.style.opacity = '0.5';
-                card.style.pointerEvents = 'none';
-            });
+	            setSearchFilterCardState(true);
             
             // Show search results in grid view
             try {
@@ -2938,62 +2978,94 @@ const statusIcon = "✅";
                 document.getElementById('search-status').textContent = 'Search failed. Please try again.';
                 document.getElementById('search-status').style.display = 'block';
                 
-                // Re-enable filter cards on error
-                const filterCards = document.querySelectorAll('.stat-card');
-                filterCards.forEach(card => {
-                    card.style.opacity = '1';
-                    card.style.pointerEvents = 'auto';
-                });
-                searchAbortController = null;
-            }
-        }
+	                // Re-enable filter cards on error
+	                setSearchFilterCardState(false);
+	                searchAbortController = null;
+	            }
+	        }
 
-        // Clear search
-        async function clearSearch() {
-            if (!searchState.active) return;
-            
-            // Determine where to return
-            let targetFilter, targetFilepath;
-            
-            if (searchState.selectedResult.filepath) {
-                // User selected something during search - go there
-                targetFilter = searchState.selectedResult.nativeFilter || searchState.preSearchContext.filter;
-                targetFilepath = searchState.selectedResult.filepath;
-            } else {
-                // Return to pre-search context
-                targetFilter = searchState.preSearchContext.filter;
-                targetFilepath = searchState.preSearchContext.filepath;
-            }
-            
-            // Clear UI elements
-            currentSearchTerm = '';
-            document.getElementById('photo-search').value = '';
-            document.getElementById('photo-search-clear').style.display = 'none';
-            document.getElementById('search-status').style.display = 'none';
-            
-            // Cancel any pending search
-            if (searchDebounceTimer) {
-                clearTimeout(searchDebounceTimer);
-                searchDebounceTimer = null;
-            }
-            
-            // Cancel any in-flight search request
-            if (searchAbortController) {
-                searchAbortController.abort();
-                searchAbortController = null;
-            }
-            
-            // Note: Keep selectedPhotos as they may have been intentionally selected
-            
+	        // Clear search
+	        async function clearSearch() {
+	            const searchInput = document.getElementById('photo-search');
+	            const clearButton = document.getElementById('photo-search-clear');
+	            const searchStatus = document.getElementById('search-status');
+	            const hadSearch = searchState.active || !!searchState.term || !!currentSearchTerm || !!searchInput?.value;
+	            
+	            // Cancel any pending search work before any early return.
+	            if (searchDebounceTimer) {
+	                clearTimeout(searchDebounceTimer);
+	                searchDebounceTimer = null;
+	            }
+	            
+	            if (searchAbortController) {
+	                searchAbortController.abort();
+	                searchAbortController = null;
+	            }
+	            
+	            if (gridAbortController) {
+	                gridAbortController.abort();
+	                gridAbortController = null;
+	            }
+	            
+	            // Ignore late photo payload responses from the old search context.
+	            photoPayloadRequestId += 1;
+	            
+	            // Determine where to return
+	            let targetFilter, targetFilepath;
+	            let wasInGridMode;
+	            
+	            if (searchState.active) {
+	                wasInGridMode = !!searchState.preSearchContext.gridMode;
+	                
+	                if (searchState.selectedResult.filepath) {
+	                    // User selected something during search - go there
+	                    targetFilter = searchState.selectedResult.nativeFilter || searchState.preSearchContext.filter;
+	                    targetFilepath = searchState.selectedResult.filepath;
+	                } else {
+	                    // Return to pre-search context
+	                    targetFilter = searchState.preSearchContext.filter;
+	                    targetFilepath = searchState.preSearchContext.filepath;
+	                }
+	            } else {
+	                // Recover gracefully from a restored search UI without active search state.
+	                wasInGridMode = !!gridMode;
+	                targetFilter = currentGridFilter || currentPhoto?.current_filter;
+	                targetFilepath = currentPhoto?.filepath || null;
+	            }
+	            
+	            targetFilter = targetFilter || currentPhoto?.current_filter || currentGridFilter || 'needs_review';
+	            
+	            // Clear UI elements
+	            currentSearchTerm = '';
+	            if (searchInput) {
+	                searchInput.value = '';
+	            }
+	            if (clearButton) {
+	                clearButton.style.display = 'none';
+	            }
+	            if (searchStatus) {
+	                searchStatus.style.display = 'none';
+	            }
+	            setSearchFilterCardState(false);
+	            
+	            // Note: Keep selectedPhotos as they may have been intentionally selected
+	            
             // Re-enable filter cards
             document.querySelectorAll('.stat-card').forEach(card => {
                 card.style.opacity = '1';
                 card.style.pointerEvents = 'auto';
-                card.classList.remove('active', 'grid-mode');
-            });
-            
-            try {
-                // Clear search on backend and set target filter
+	                card.classList.remove('active', 'grid-mode');
+	            });
+	            
+	            // Reset search state before awaited work so stale callbacks don't rely on it.
+	            searchState = createEmptySearchState();
+	            
+	            if (!hadSearch) {
+	                return;
+	            }
+	            
+	            try {
+	                // Clear search on backend and set target filter
                 const response = await fetch('/api/set_query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -3008,12 +3080,9 @@ const statusIcon = "✅";
                     throw new Error('Failed to clear search');
                 }
                 
-                // Restore the mode user was in before search
-                const wasInGridMode = searchState.preSearchContext.gridMode || false;
-                
-                // Update filter card highlighting
-                const targetCard = document.querySelector(`.stat-card[onclick*="${targetFilter}"]`);
-                if (targetCard) {
+	                // Update filter card highlighting
+	                const targetCard = document.querySelector(`.stat-card[onclick*="${targetFilter}"]`);
+	                if (targetCard) {
                     targetCard.classList.add('active');
                     if (wasInGridMode) {
                         targetCard.classList.add('grid-mode');
@@ -3045,16 +3114,14 @@ const statusIcon = "✅";
                         // No specific photo - just load current photo
                         await loadCurrentPhoto();
                     }
-                }
-                
-            } catch (error) {
-                console.error('Error clearing search:', error);
-                // Still try to return to pre-search state
-                const wasInGridMode = searchState.preSearchContext.gridMode || false;
-                
-                if (wasInGridMode) {
-                    gridMode = true;
-                    currentGridFilter = targetFilter;
+	                }
+	                
+	            } catch (error) {
+	                console.error('Error clearing search:', error);
+	                // Still try to return to the best available non-search state.
+	                if (wasInGridMode) {
+	                    gridMode = true;
+	                    currentGridFilter = targetFilter;
                     await showGridView(targetFilter, 0);
                     if (targetFilepath) {
                         await loadPhotoByPath(targetFilepath);
@@ -3066,18 +3133,10 @@ const statusIcon = "✅";
                         await exitGridMode(targetFilepath);
                     } else {
                         await loadCurrentPhoto();
-                    }
-                }
-            }
-            
-            // Reset search state
-            searchState = {
-                active: false,
-                term: '',
-                preSearchContext: {},
-                selectedResult: {}
-            };
-        }
+	                    }
+	                }
+	            }
+	        }
 
         
         // Set filter
@@ -3147,16 +3206,15 @@ const statusIcon = "✅";
                     currentGridFilter = null;
                 } else {
                     // Make sure backend knows about the filter before showing grid
-                    await fetch('/api/filter', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            filter: filter,
-                            preserve_search: !!currentSearchTerm,
-                            search: currentSearchTerm || '',  // Include actual search term
-                            keep_current: true
-                        })
-                    });
+	                    await fetch('/api/set_query', {
+	                        method: 'POST',
+	                        headers: { 'Content-Type': 'application/json' },
+	                        body: JSON.stringify({ 
+	                            filter: filter,
+	                            search: currentSearchTerm || '',
+	                            keep_current: true
+	                        })
+	                    });
                     await showGridView(filter, currentPhoto ? currentPhoto.current_index : 0);
                 }
             } else if (wasGridMode) {
@@ -3189,15 +3247,14 @@ const statusIcon = "✅";
                 }
                 
                 try {
-                    const response = await fetch('/api/filter', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            filter: filter,
-                            preserve_search: !!currentSearchTerm,  // Preserve search if we have one
-                            search: currentSearchTerm || ''  // Include actual search term
-                        })
-                    });
+	                    const response = await fetch('/api/set_query', {
+	                        method: 'POST',
+	                        headers: { 'Content-Type': 'application/json' },
+	                        body: JSON.stringify({ 
+	                            filter: filter,
+	                            search: currentSearchTerm || ''
+	                        })
+	                    });
                     
                     if (response.ok) {
                         if (!preventRefresh) {
@@ -3275,7 +3332,7 @@ const statusIcon = "✅";
         }
         
         // Show grid view
-        async function showGridView(filter, startIndex = 0) {
+	        async function showGridView(filter, startIndex = 0) {
             // Cancel any in-flight grid loading
             if (gridAbortController) {
                 gridAbortController.abort();
@@ -3308,7 +3365,7 @@ const statusIcon = "✅";
                 </div>
             `;
             
-            try {
+	            try {
                 let page = 1;
                 let hasMore = true;
                 const gridContainer = document.getElementById('photo-grid');
@@ -3453,11 +3510,11 @@ const statusIcon = "✅";
                     }, 100);
                 }
                 
-            } catch (error) {
-                // Don't show error if request was aborted (user changed view)
-                if (error.name === 'AbortError') {
-                    return;
-                }
+	            } catch (error) {
+	                // Don't show error if request was aborted (user changed view)
+	                if (error.name === 'AbortError') {
+	                    return;
+	                }
                 
                 console.error('Error loading grid:', error);
                 document.getElementById('photo-grid').innerHTML = `
@@ -3465,22 +3522,26 @@ const statusIcon = "✅";
                         <div style="color: var(--status-error);">Failed to load photos: ${error.message}</div>
                     </div>
                 `;
-            } finally {
-                gridAbortController = null;
-            }
-        }
-        
-        // Load photo metadata by filepath (for grid mode)
-        async function loadPhotoByPath(filepath) {
-            const params = new URLSearchParams();
-            params.append('filepath', filepath);
-            if (currentSearchTerm) params.append('search', currentSearchTerm);
+	            } finally {
+	                if (gridAbortController === controller) {
+	                    gridAbortController = null;
+	                }
+	            }
+	        }
+	        
+	        // Load photo metadata by filepath (for grid mode)
+	        async function loadPhotoByPath(filepath) {
+	            const requestId = ++photoPayloadRequestId;
+	            const params = new URLSearchParams();
+	            params.append('filepath', filepath);
+	            if (currentSearchTerm) params.append('search', currentSearchTerm);
 
-            const res  = await fetch(`/api/current?${params}`);
-            const data = await res.json();
-            if (!res.ok) { console.error('Failed:', data.error); return; }
+	            const res  = await fetch(`/api/current?${params}`);
+	            const data = await res.json();
+	            if (requestId !== photoPayloadRequestId) return;
+	            if (!res.ok) { console.error('Failed:', data.error); return; }
 
-            currentPhoto = data;          // same as before
+	            currentPhoto = data;          // same as before
             updateMetadataPanel(data);
             updateGridSelection(filepath);
         }
@@ -3682,17 +3743,19 @@ const statusIcon = "✅";
                     };
                 }
                 
-                try {
-                    const res = await fetch('/api/select', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+	                try {
+	                    const requestId = ++photoPayloadRequestId;
+	                    const res = await fetch('/api/select', {
+	                        method: 'POST',
+	                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             filepath: targetFilepath,
                             search: currentSearchTerm  // '' if not searching
                         })
-                    });
-                    const data = await res.json();
-                    if (!res.ok) throw new Error(data.error);
+	                    });
+	                    const data = await res.json();
+	                    if (requestId !== photoPayloadRequestId) return;
+	                    if (!res.ok) throw new Error(data.error);
                     
                     // data already contains the full photo payload
                     // Don't call loadCurrentPhoto() - we already have the data
